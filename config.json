@@ -1,0 +1,46 @@
+{
+    "aws": {
+        "region": "us-east-1",
+        "transcribe": {
+            "language_code": "es-ES",
+            "sample_rate": 16000,
+            "vocabulary_name": "voice-assistant-vocab"
+        },
+        "polly": {
+            "voice_id": "Lupe",
+            "output_format": "mp3",
+            "sample_rate": "22050"
+        },
+        "lex": {
+            "bot_name": "VoiceAssistantBot",
+            "bot_alias": "PROD",
+            "locale_id": "es_ES"
+        },
+        "iot": {
+            "thing_name": "raspberry-voice-assistant",
+            "endpoint": "your-iot-endpoint.amazonaws.com"
+        },
+        "dynamodb": {
+            "table_name": "voice-assistant-data",
+            "region": "us-east-1"
+        }
+    },
+    "audio": {
+        "sample_rate": 16000,
+        "chunk_size": 1024,
+        "channels": 1,
+        "input_device_index": null,
+        "output_device_index": null
+    },
+    "wake_words": ["asistente", "alexa", "hola asistente"],
+    "session": {
+        "timeout_seconds": 30,
+        "max_command_length_seconds": 10
+    },
+    "features": {
+        "cloud_sync_enabled": true,
+        "iot_control_enabled": true,
+        "voice_cache_enabled": true,
+        "debug_logging": false
+    }
+}

@@ -1,0 +1,3 @@
+El archivo que se grabara tendrá un formato original wav y posteriormente para enviar una menor cantidad de datos se convertiria en el dispositivo a mp3. Para ello utilizaremos FFMPEG como herramienta de conversion.
+Necesitamos que el servicio cognitivo que camia de voz a texto se encuentre en la nue de AWS, dee ser de pago por uso y que sea factile para la conversión masiva a ajo costo.
+Para ello utilizaremos un Service Bus como Kafka para pocesar colas de espera, posteriormente utiliozaremos tecnologias lamda con netcore para realizar la conversión, los archivos de audio serán enviados a bucket s3  
