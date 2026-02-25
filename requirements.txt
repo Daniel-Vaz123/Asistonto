@@ -1,34 +1,21 @@
-# Dependencias principales del Asistente de Voz para Raspberry Pi
+# Dependencias del Asistente de Voz "Kiro"
 
-# AWS SDK
+# AWS SDK (Polly para respuestas habladas)
 boto3>=1.28.0
 botocore>=1.31.0
-amazon-transcribe>=0.6.0
 
-# Audio processing
+# Audio
 pyaudio>=0.2.13
 numpy>=1.24.0
 
-# Async support
-asyncio>=3.4.3
+# Async
 aiohttp>=3.8.0
 
-# Database
-aiosqlite>=0.19.0
-
-# Testing
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
-pytest-mock>=3.11.0
-hypothesis>=6.82.0
-moto>=4.1.0
-
-# Utilities
-python-dotenv>=1.0.0
-
-# Conversión MP3 → PCM para reproducción (respuestas Polly)
-pydub>=0.25.0
-
-# Modo gratuito / local (sin AWS)
+# Transcripción local (Vosk – reconocimiento de voz offline)
 vosk>=0.3.45
-pyttsx3>=2.90
+
+# IA / Preguntas generales (DeepSeek)
+openai>=1.0.0
+
+# Utilidades
+python-dotenv>=1.0.0

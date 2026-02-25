@@ -8,8 +8,8 @@
         },
         "polly": {
             "voice_id": "Mia",
-            "output_format": "mp3",
-            "sample_rate": "22050"
+            "output_format": "pcm",
+            "sample_rate": "16000"
         },
         "lex": {
             "bot_name": "VoiceAssistantBot",
@@ -27,7 +27,7 @@
     },
     "audio": {
         "sample_rate": 16000,
-        "chunk_size": 1024,
+        "chunk_size": 4000,
         "channels": 1,
         "input_device_index": null,
         "output_device_index": null
@@ -43,9 +43,11 @@
         "voice_cache_enabled": true,
         "debug_logging": false
     },
-    "user_name": "Usuario",
-    "voice_mode": "local",
-    "local": {
-        "vosk_model_path": "model/vosk-model-es-0.42"
+    "user_name": "Alejandro",
+    "transcribe_provider": "vosk",
+    "vosk": {
+        "model_path": "model/vosk-model-small-es-0.42",
+        "sample_rate": 16000,
+        "buffer_ms": 500
     }
 }

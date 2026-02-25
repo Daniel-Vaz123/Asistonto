@@ -1,18 +1,10 @@
 """
-Punto de entrada principal del Asistente de Voz para Raspberry Pi
+Punto de entrada principal del Asistente de Voz (PC o Raspberry Pi).
 
-Este script orquesta todos los componentes del sistema para crear
-un asistente de voz funcional con detección de wake word y transcripción
-en tiempo real usando AWS Transcribe.
+Orquesta los componentes del sistema: captura de audio, detección de wake word
+y transcripción en tiempo real con AWS Transcribe, respuestas con Amazon Polly.
 
-Flujo del MVP:
-1. Captura de audio continua desde el micrófono
-2. Detección de wake word "Asistente" 
-3. Streaming a AWS Transcribe
-4. Salida de texto transcrito en consola con colores
-
-Autor: VoiceAssistantBot Team
-Plataforma: Raspberry Pi 4
+Flujo: captura continua → wake word → comando por voz → procesamiento → respuesta hablada.
 """
 
 import asyncio
@@ -30,7 +22,6 @@ from src.transcribe_client import TranscribeStreamingClientWrapper
 from src.wake_word_detector import WakeWordDetector, WakeWordDetection
 from src.command_transcriber import CommandTranscriber, CommandTranscription
 from src.response_generator import ResponseGenerator
-from src.response_generator_local import LocalResponseGenerator
 from src.command_processor import CommandProcessor
 
 # Cargar variables de entorno
@@ -46,7 +37,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('logs/voice_assistant.log'),
-        logging.StreamHandler(sys.stdout)
     ]
 )
 
@@ -244,22 +234,17 @@ class VoiceAssistantMVP:
             print_status(f"Error al calibrar micrófono: {e}", "error")
             raise
         
-        # 3. Inicializar ResponseGenerator (Polly o local pyttsx3)
-        voice_mode = self.config.get("voice_mode") or "aws"
-        if voice_mode == "local":
-            print_status("Inicializando generador de respuestas (local, pyttsx3)...", "info")
-            self.response_generator = LocalResponseGenerator(rate=150, volume=1.0)
-        else:
-            print_status("Inicializando generador de respuestas (Amazon Polly)...", "info")
-            polly_config = self.config['aws']['polly']
-            self.response_generator = ResponseGenerator(
-                audio_manager=self.audio_manager,
-                polly_voice_id=polly_config['voice_id'],
-                output_format=polly_config['output_format'],
-                sample_rate=polly_config['sample_rate'],
-                cache_enabled=self.config['features']['voice_cache_enabled'],
-                region=self.config['aws']['region']
-            )
+        # 3. Inicializar ResponseGenerator (Amazon Polly)
+        print_status("Inicializando generador de respuestas (Amazon Polly)...", "info")
+        polly_config = self.config['aws']['polly']
+        self.response_generator = ResponseGenerator(
+            audio_manager=self.audio_manager,
+            polly_voice_id=polly_config['voice_id'],
+            output_format=polly_config['output_format'],
+            sample_rate=polly_config['sample_rate'],
+            cache_enabled=self.config['features']['voice_cache_enabled'],
+            region=self.config['aws']['region']
+        )
         
         # 4. Inicializar CommandProcessor
         print_status("Inicializando procesador de comandos...", "info")
@@ -269,16 +254,16 @@ class VoiceAssistantMVP:
             user_name=user_name
         )
         
-        # 5. Inicializar cliente de transcripción (AWS Transcribe o Vosk local)
-        sample_rate = self.config['audio']['sample_rate']
-        if voice_mode == "local":
-            print_status("Inicializando transcripción (Vosk, modo gratuito)...", "info")
+        # 5. Inicializar cliente de transcripción (AWS, Google o Vosk local)
+        transcribe_provider = (self.config.get("transcribe_provider") or "vosk").lower()
+        if transcribe_provider == "vosk":
+            print_status("Inicializando transcripción local (Vosk)...", "info")
             from src.transcribe_client_vosk import VoskTranscribeStreamingWrapper
-            local_config = self.config.get("local") or {}
-            model_path = local_config.get("vosk_model_path", "model")
+            vosk_cfg = self.config.get("vosk") or {}
             self.transcribe_client = VoskTranscribeStreamingWrapper(
-                model_path=model_path,
-                sample_rate=sample_rate,
+                model_path=vosk_cfg.get("model_path", "model/vosk-model-small-es-0.42"),
+                sample_rate=int(vosk_cfg.get("sample_rate", 16000)),
+                buffer_ms=float(vosk_cfg.get("buffer_ms", 300)),
             )
         else:
             print_status("Inicializando cliente de AWS Transcribe...", "info")
@@ -300,11 +285,9 @@ class VoiceAssistantMVP:
             confidence_threshold=0.7
         )
         
-        # Registrar callback para wake word detectado
+        # Registrar callbacks
         self.wake_word_detector.on_wake_word_detected(self._on_wake_word_detected)
-        # En modo local, mostrar en consola lo que se escucha (para verificar que el mic funciona)
-        if voice_mode == "local":
-            self.wake_word_detector.on_partial_transcription(self._on_partial_show)
+        self.wake_word_detector.on_hearing(self._on_hearing)
         
         # 7. Inicializar CommandTranscriber
         print_status("Inicializando transcriptor de comandos...", "info")
@@ -339,23 +322,29 @@ class VoiceAssistantMVP:
         print_status("Iniciando captura de audio...", "processing")
         self.audio_manager.start_continuous_capture()
         await asyncio.sleep(0.5)  # Dar tiempo para que el buffer se llene
-        # Prueba rápida: que el usuario hable para ver nivel del mic
-        print_status("Di algo en 2 segundos para probar el micrófono...", "processing")
-        await asyncio.sleep(2.0)
-        chunks = self.audio_manager.get_audio_buffer(num_chunks=32)
-        if chunks:
-            import numpy as np
-            raw = b"".join(chunks)
-            arr = np.frombuffer(raw, dtype=np.int16)
-            rms = float(np.sqrt(np.mean(arr.astype(np.float32) ** 2)))
-            print_status(f"Nivel de micrófono: {rms:.0f} (si es < 300, sube el volumen del mic en Windows)", "info" if rms >= 300 else "warning")
-        else:
-            print_status("No se recibió audio del micrófono. Revisa dispositivo y permisos.", "warning")
-        print_status("Iniciando detección de wake words...", "processing")
+        # Comprobar que el micrófono capta (ayuda a detectar si no hay voz)
+        try:
+            chunks = self.audio_manager.get_audio_buffer(num_chunks=32)
+            if chunks:
+                import numpy as np
+                raw = b"".join(chunks)
+                arr = np.frombuffer(raw, dtype=np.int16)
+                rms = float(np.sqrt(np.mean(arr.astype(np.float32) ** 2)))
+                if rms < 200:
+                    print_status("Nivel de micrófono bajo. Sube el volumen del mic en Windows o acércate.", "warning")
+                else:
+                    print_status(f"Nivel de micrófono OK (RMS ≈ {rms:.0f})", "info")
+            else:
+                print_status("No se recibió audio. Comprueba el dispositivo de entrada.", "warning")
+        except Exception as e:
+            logger.debug("Comprobación de micrófono omitida: %s", e)
         print()
-        print(f"{Colors.BRIGHT_WHITE}{'='*70}{Colors.RESET}")
-        print(f"{Colors.BRIGHT_GREEN}{Colors.BOLD}🎤 SISTEMA LISTO - Di '{self.config['wake_words'][0].upper()}' para activar{Colors.RESET}")
-        print(f"{Colors.BRIGHT_WHITE}{'='*70}{Colors.RESET}")
+        ww = self.config['wake_words'][0].upper()
+        print(f"{Colors.BRIGHT_WHITE}  {'='*60}{Colors.RESET}")
+        print(f"{Colors.BRIGHT_GREEN}{Colors.BOLD}  🎤 SISTEMA LISTO — Di '{ww}' para activarme{Colors.RESET}")
+        print(f"{Colors.BRIGHT_BLACK}     Verás lo que escucho en gris. Cuando diga '{ww}'{Colors.RESET}")
+        print(f"{Colors.BRIGHT_BLACK}     pasaré a modo comando y responderé.{Colors.RESET}")
+        print(f"{Colors.BRIGHT_WHITE}  {'='*60}{Colors.RESET}")
         print()
         
         # Iniciar detección de wake words (esto corre indefinidamente)
@@ -376,143 +365,107 @@ class VoiceAssistantMVP:
         
         print_status("Sistema detenido correctamente", "success")
     
-    def _on_partial_show(self, text: str):
-        """Muestra en consola lo que se está escuchando (modo local, para verificar mic)."""
-        if text and text.strip():
-            print(f"{Colors.YELLOW}  🎤 Escuchando: {text.strip()}{Colors.RESET}", end="\r")
+    # ------------------------------------------------------------------
+    # Callbacks: flujo tipo Alexa
+    # ------------------------------------------------------------------
+
+    def _on_hearing(self, text: str, is_partial: bool):
+        """Muestra en consola lo que se escucha mientras espera el wake word."""
+        if is_partial:
+            label = f"{Colors.BRIGHT_BLACK}  🎤 {text}{Colors.RESET}"
+            print(f"\r{label}", end="", flush=True)
+        else:
+            ww_hint = self.config['wake_words'][0]
+            label = f"{Colors.YELLOW}  > {text}  {Colors.BRIGHT_BLACK}(di '{ww_hint}' para activar){Colors.RESET}"
+            print(f"\r{label}")
 
     def _on_wake_word_detected(self, detection: WakeWordDetection):
-        """
-        Callback cuando se detecta un wake word.
-        Retorna la tarea de captura para que el detector espere y no abra dos streams.
-        
-        Args:
-            detection: Información de la detección
-        """
-        print()  # Nueva línea para no mezclar con "Escuchando: ..."
-        print_status(
-            f"WAKE WORD DETECTADO: '{detection.wake_word.upper()}' "
-            f"(confianza: {detection.confidence:.0%})",
-            "wake_word"
-        )
-        
-        # Capturar comando después del wake word (misma tarea se espera en el detector)
-        print_status("Escuchando comando...", "processing")
-        return asyncio.create_task(self._capture_command())
-    
-    async def _capture_command(self):
-        """Captura y transcribe un comando después del wake word"""
+        """Wake word detectado → escuchar comando → responder → volver a escuchar."""
+        print("\r" + " " * 80, end="\r")
+        print()
+        print(f"{Colors.BRIGHT_GREEN}{Colors.BOLD}  ✦  WAKE WORD: '{detection.wake_word.upper()}' detectado{Colors.RESET}")
+
+        if detection.inline_command:
+            # El usuario dijo "asistente qué hora es" de corrido → procesar directamente
+            print(f"{Colors.BRIGHT_CYAN}  ➤  Comando detectado en la misma frase{Colors.RESET}")
+            print()
+            return asyncio.create_task(self._process_inline_command(detection.inline_command))
+        else:
+            # Solo dijo "asistente" → escuchar comando aparte
+            print(f"{Colors.BRIGHT_CYAN}  ➤  Te escucho, di tu comando...{Colors.RESET}")
+            print()
+            return asyncio.create_task(self._capture_command())
+
+    async def _process_inline_command(self, command_text: str):
+        """Procesa un comando que vino pegado al wake word (ej. 'asistente qué hora es')."""
         try:
-            # Capturar comando
-            result = await self.command_transcriber.capture_command()
-            
-            if result:
-                # Comando transcrito exitosamente
-                print()
-                print(f"{Colors.BRIGHT_WHITE}{'='*70}{Colors.RESET}")
-                print_status(
-                    f"COMANDO TRANSCRITO: \"{result.text}\"",
-                    "transcription"
-                )
-                print(f"{Colors.BRIGHT_WHITE}  Confianza: {result.confidence:.0%}{Colors.RESET}")
-                print(f"{Colors.BRIGHT_WHITE}  Duración: {result.duration:.1f}s{Colors.RESET}")
-                print(f"{Colors.BRIGHT_WHITE}  Idioma: {result.language_code or 'es-ES'}{Colors.RESET}")
-                print(f"{Colors.BRIGHT_WHITE}{'='*70}{Colors.RESET}")
-                print()
-                
-                # Procesar comando con el CommandProcessor
-                print_status("Procesando comando...", "processing")
-                command_result = await self.command_processor.process_command(
-                    result.text,
-                    speak=True  # Hablar la respuesta
-                )
-                
-                if command_result['success']:
-                    # Mostrar respuesta en consola con formato elegante tipo banner
-                    print()
-                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}╔{'═'*68}╗{Colors.RESET}")
-                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}║{' '*68}║{Colors.RESET}")
-                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}║  🤖 KIRO RESPONDE:{' '*50}║{Colors.RESET}")
-                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}║{' '*68}║{Colors.RESET}")
-                    
-                    # Dividir respuesta en líneas si es muy larga
-                    response_text = command_result['response_text']
-                    max_width = 64
-                    words = response_text.split()
-                    lines = []
-                    current_line = ""
-                    
-                    for word in words:
-                        if len(current_line) + len(word) + 1 <= max_width:
-                            current_line += (word + " ")
-                        else:
-                            lines.append(current_line.strip())
-                            current_line = word + " "
-                    if current_line:
-                        lines.append(current_line.strip())
-                    
-                    # Imprimir cada línea centrada en el banner
-                    for line in lines:
-                        padding = (64 - len(line)) // 2
-                        print(f"{Colors.BRIGHT_WHITE}║  {' '*padding}{line}{' '*(64-len(line)-padding)}  ║{Colors.RESET}")
-                    
-                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}║{' '*68}║{Colors.RESET}")
-                    
-                    if command_result['spoken']:
-                        tts_name = "voz local (pyttsx3)" if self.config.get("voice_mode") == "local" else "Amazon Polly (Mia)"
-                        print(f"{Colors.BRIGHT_GREEN}║  🔊 Respuesta hablada con {tts_name}{' '*(52-len(tts_name))}║{Colors.RESET}")
-                    else:
-                        print(f"{Colors.BRIGHT_YELLOW}║  ⚠ Solo texto (error en síntesis de voz){' '*27}║{Colors.RESET}")
-                    
-                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}║{' '*68}║{Colors.RESET}")
-                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}╚{'═'*68}╝{Colors.RESET}")
-                    print()
-                else:
-                    print_status("Error procesando comando", "error")
-                
-                # Volver a escuchar wake word
-                print_status(
-                    f"Esperando wake word '{self.config['wake_words'][0]}'...",
-                    "info"
-                )
+            print(f"{Colors.BRIGHT_WHITE}  💬 Tú dijiste: \"{command_text}\"{Colors.RESET}")
+            print()
+            command_result = await self.command_processor.process_command(command_text, speak=True)
+            if command_result['success']:
+                print(f"{Colors.BRIGHT_CYAN}  🤖 Kiro: {command_result['response_text']}{Colors.RESET}")
+                if command_result.get('spoken'):
+                    print(f"{Colors.BRIGHT_BLACK}     (hablado con Polly){Colors.RESET}")
             else:
-                print_status("No se pudo transcribir el comando", "warning")
-                print_status(
-                    f"Esperando wake word '{self.config['wake_words'][0]}'...",
-                    "info"
+                print(f"{Colors.BRIGHT_RED}  ✗ No pude procesar el comando.{Colors.RESET}")
+        except Exception as e:
+            print_status(f"Error procesando comando: {e}", "error")
+            logger.error("Error en _process_inline_command: %s", e, exc_info=True)
+        print()
+        print(f"{Colors.BRIGHT_BLACK}  {'─'*60}{Colors.RESET}")
+        ww = self.config['wake_words'][0].upper()
+        print(f"{Colors.BRIGHT_GREEN}  🎤 Escuchando... di '{ww}' para activarme{Colors.RESET}")
+        print()
+
+    async def _capture_command(self):
+        """Captura comando, lo procesa y responde."""
+        try:
+            result = await self.command_transcriber.capture_command()
+
+            # Limpiar línea parcial
+            print("\r" + " " * 80, end="\r")
+
+            if result and result.text.strip():
+                print(f"{Colors.BRIGHT_WHITE}  💬 Tú dijiste: \"{result.text}\"{Colors.RESET}")
+                print()
+
+                command_result = await self.command_processor.process_command(
+                    result.text, speak=True
                 )
-                
+
+                if command_result['success']:
+                    response = command_result['response_text']
+                    print(f"{Colors.BRIGHT_CYAN}  🤖 Kiro: {response}{Colors.RESET}")
+                    if command_result.get('spoken'):
+                        print(f"{Colors.BRIGHT_BLACK}     (hablado con Polly){Colors.RESET}")
+                    else:
+                        print(f"{Colors.BRIGHT_YELLOW}     (solo texto){Colors.RESET}")
+                else:
+                    print(f"{Colors.BRIGHT_RED}  ✗ No pude procesar el comando.{Colors.RESET}")
+            else:
+                print(f"{Colors.BRIGHT_YELLOW}  ⚠ No escuché ningún comando.{Colors.RESET}")
+
+            # Separador y volver a escuchar
+            print()
+            print(f"{Colors.BRIGHT_BLACK}  {'─'*60}{Colors.RESET}")
+            ww = self.config['wake_words'][0].upper()
+            print(f"{Colors.BRIGHT_GREEN}  🎤 Escuchando... di '{ww}' para activarme{Colors.RESET}")
+            print()
+
         except Exception as e:
             print_status(f"Error capturando comando: {e}", "error")
-            logger.error(f"Error en _capture_command: {e}", exc_info=True)
-    
+            logger.error("Error en _capture_command: %s", e, exc_info=True)
+
     def _on_partial_transcription(self, text: str):
-        """
-        Callback para transcripciones parciales.
-        
-        Args:
-            text: Texto transcrito parcialmente
-        """
-        # Mostrar transcripción parcial en tiempo real
-        print(f"{Colors.YELLOW}  ⏳ {text}...{Colors.RESET}", end='\r')
-    
+        """Muestra transcripción parcial del comando en tiempo real."""
+        print(f"\r{Colors.YELLOW}  ⏳ {text}...{Colors.RESET}", end="", flush=True)
+
     def _on_final_transcription(self, transcription: CommandTranscription):
-        """
-        Callback para transcripción final.
-        
-        Args:
-            transcription: Resultado de transcripción completo
-        """
-        # Limpiar línea de transcripción parcial
-        print(" " * 100, end='\r')
-    
+        """Limpia la línea parcial."""
+        print("\r" + " " * 80, end="\r")
+
     def _on_transcription_error(self, error: Exception):
-        """
-        Callback para errores de transcripción.
-        
-        Args:
-            error: Excepción ocurrida
-        """
+        """Error de transcripción."""
         print_status(f"Error de transcripción: {error}", "error")
 
 

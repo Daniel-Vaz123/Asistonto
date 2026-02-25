@@ -68,6 +68,9 @@ class AudioManager:
         self._audio_buffer: deque = deque(maxlen=self.buffer_max_chunks)
         self._buffer_lock = threading.Lock()
         
+        # Cola de streaming: audio secuencial para transcripción (no repite chunks)
+        self._streaming_queue: queue.Queue = queue.Queue(maxsize=500)
+        
         # Cola de reproducción para múltiples audios
         self._playback_queue: queue.Queue = queue.Queue()
         
@@ -282,6 +285,11 @@ class AudioManager:
                         # Agregar al buffer circular con lock
                         with self._buffer_lock:
                             self._audio_buffer.append(audio_data)
+                        # También poner en la cola de streaming (secuencial)
+                        try:
+                            self._streaming_queue.put_nowait(audio_data)
+                        except queue.Full:
+                            pass
                     
                     except IOError as e:
                         logger.warning(f"IOError durante captura: {e}")
@@ -341,7 +349,8 @@ class AudioManager:
     
     def get_audio_chunk(self, timeout: float = 1.0) -> Optional[bytes]:
         """
-        Obtiene el chunk de audio más reciente del buffer.
+        Obtiene el siguiente chunk de audio de la cola de streaming (secuencial).
+        Cada chunk se entrega una sola vez, como leer de un micrófono.
         
         Args:
             timeout: Tiempo máximo de espera en segundos (default: 1.0)
@@ -349,16 +358,10 @@ class AudioManager:
         Returns:
             Bytes de audio o None si no hay datos disponibles
         """
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            with self._buffer_lock:
-                if len(self._audio_buffer) > 0:
-                    return self._audio_buffer[-1]  # Retornar el más reciente
-            
-            time.sleep(0.01)  # Pequeña espera para no saturar CPU
-        
-        return None
+        try:
+            return self._streaming_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
     
     def get_audio_buffer(self, num_chunks: Optional[int] = None) -> List[bytes]:
         """
@@ -379,9 +382,14 @@ class AudioManager:
 
     
     def clear_buffer(self) -> None:
-        """Limpia el buffer circular de audio."""
+        """Limpia el buffer circular y la cola de streaming."""
         with self._buffer_lock:
             self._audio_buffer.clear()
+        while not self._streaming_queue.empty():
+            try:
+                self._streaming_queue.get_nowait()
+            except queue.Empty:
+                break
         logger.debug("Buffer de audio limpiado")
     
     def play_audio(self, audio_data: bytes, block: bool = True) -> None:

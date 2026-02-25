@@ -20,8 +20,9 @@ Requisitos implementados:
 import asyncio
 import logging
 import time
+from difflib import SequenceMatcher
 from typing import List, Optional, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from src.audio_manager import AudioManager
 from src.transcribe_client import (
@@ -40,6 +41,7 @@ class WakeWordDetection:
     confidence: float
     timestamp: float
     full_transcription: str
+    inline_command: Optional[str] = None  # Texto después del wake word (ej. "asistente qué hora es" → "qué hora es")
 
 
 class WakeWordDetector:
@@ -83,12 +85,13 @@ class WakeWordDetector:
         
         # Estado interno
         self._is_detecting = False
-        self._paused = False  # Pausar stream para capturar comando (evitar dos streams)
-        self._pending_command_task = None  # Tarea de captura para await tras el stream
+        self._paused = False
+        self._pending_command_task = None
         self._detection_callback: Optional[Callable[[WakeWordDetection], None]] = None
-        self._on_partial_callback: Optional[Callable[[str], None]] = None  # Para mostrar en consola lo que se escucha
+        self._on_hearing_callback: Optional[Callable[[str, bool], None]] = None
         self._last_detection_time: Optional[float] = None
         self._recent_transcriptions: List[str] = []
+        self._fuzzy_threshold = 0.70
         
         logger.info(
             f"WakeWordDetector inicializado: wake_words={wake_words}, "
@@ -101,20 +104,13 @@ class WakeWordDetector:
         logger.debug("Detección pausada (captura de comando)")
 
     def on_wake_word_detected(self, callback: Callable[[WakeWordDetection], None]) -> None:
-        """
-        Registra un callback para cuando se detecte un wake word.
-        El callback puede retornar un Awaitable (ej. Task) que se esperará tras cerrar el stream.
-        
-        Args:
-            callback: Función a llamar cuando se detecte wake word
-        """
+        """Registra callback para detección de wake word."""
         self._detection_callback = callback
-        logger.debug("Callback de detección registrado")
 
-    def on_partial_transcription(self, callback: Optional[Callable[[str], None]]) -> None:
-        """Registra un callback para transcripciones parciales (para mostrar en consola lo que se escucha)."""
-        self._on_partial_callback = callback
-    
+    def on_hearing(self, callback: Callable[[str, bool], None]) -> None:
+        """Registra callback (text, is_partial) para mostrar lo que se escucha."""
+        self._on_hearing_callback = callback
+
     async def start_detection(self) -> None:
         """
         Inicia la detección continua de wake words.
@@ -211,101 +207,70 @@ class WakeWordDetector:
             raise
     
     def _handle_transcription(self, transcription: TranscriptionResult) -> None:
-        """
-        Maneja transcripciones recibidas de AWS Transcribe.
-        
-        Analiza el texto transcrito en busca de wake words.
-        
-        Args:
-            transcription: Resultado de transcripción
-        """
+        """Analiza transcripciones en busca de wake words y notifica lo que se escucha."""
         try:
-            # Normalizar texto a minúsculas para comparación
             text_lower = transcription.text.lower().strip()
-            
             if not text_lower:
                 return
-            
-            # Agregar a transcripciones recientes
+
+            # Mostrar en consola lo que se escucha
+            if self._on_hearing_callback:
+                self._on_hearing_callback(transcription.text, transcription.is_partial)
+
             self._recent_transcriptions.append(text_lower)
-            
-            # Mantener solo las últimas 10 transcripciones
             if len(self._recent_transcriptions) > 10:
                 self._recent_transcriptions.pop(0)
-            
-            # Buscar wake words en la transcripción
+
             detected_word = self._check_for_wake_word(text_lower)
-            
+
             if detected_word:
-                # Verificar que no sea una detección duplicada reciente
                 current_time = time.time()
-                
-                if (self._last_detection_time is None or 
-                    current_time - self._last_detection_time > self.detection_window):
-                    
-                    # Wake word detectado!
+                if (self._last_detection_time is None or
+                        current_time - self._last_detection_time > self.detection_window):
+                    # Extraer texto después del wake word (ej. "asistente qué hora es" → "qué hora es")
+                    inline_cmd = None
+                    idx = text_lower.find(detected_word)
+                    if idx >= 0:
+                        after = text_lower[idx + len(detected_word):].strip()
+                        if len(after) > 2:
+                            inline_cmd = after
                     detection = WakeWordDetection(
                         wake_word=detected_word,
                         confidence=transcription.confidence,
                         timestamp=current_time,
-                        full_transcription=transcription.text
+                        full_transcription=transcription.text,
+                        inline_command=inline_cmd,
                     )
-                    
                     self._last_detection_time = current_time
-                    
-                    logger.info(
-                        f"🎤 Wake word detectado: '{detected_word}' "
-                        f"(confianza: {transcription.confidence:.2f})"
-                    )
-                    
-                    # Pausar stream para liberar el cliente y permitir captura de comando
+                    logger.info("Wake word detectado: '%s'", detected_word)
+
                     self._paused = True
-                    # Notificar callback; si retorna un Awaitable (Task/Coroutine), lo esperamos tras cerrar el stream
                     if self._detection_callback:
                         result = self._detection_callback(detection)
                         if result is not None and (asyncio.iscoroutine(result) or isinstance(result, asyncio.Task)):
                             self._pending_command_task = asyncio.ensure_future(result)
-                else:
-                    logger.debug(
-                        f"Wake word detectado pero ignorado (muy reciente): '{detected_word}'"
-                    )
-            
-            # Callback para mostrar en consola lo que se escucha (útil para verificar micrófono)
-            if transcription.is_partial and self._on_partial_callback and text_lower:
-                self._on_partial_callback(transcription.text)
-            # Log de transcripciones para debugging
-            if transcription.is_partial:
-                logger.debug(f"Transcripción parcial: '{transcription.text}'")
-            else:
-                logger.debug(f"Transcripción final: '{transcription.text}'")
-                
+
         except Exception as e:
-            logger.error(f"Error manejando transcripción: {e}")
+            logger.error("Error manejando transcripción: %s", e)
     
     def _check_for_wake_word(self, text: str) -> Optional[str]:
-        """
-        Verifica si el texto contiene algún wake word.
-        
-        Args:
-            text: Texto transcrito (ya en minúsculas)
-        
-        Returns:
-            Wake word detectado o None si no se encontró ninguno
-        """
-        # Buscar cada wake word en el texto
+        """Verifica si el texto contiene algún wake word (exacto o aproximado)."""
+        words_in_text = text.split()
+
         for wake_word in self.wake_words:
-            # Buscar palabra completa (no como substring)
-            # Ej: "asistente" debe coincidir en "hola asistente" pero no en "asistentes"
-            words_in_text = text.split()
-            
-            # Verificar coincidencia exacta de palabra
+            # Exacto
             if wake_word in words_in_text:
                 return wake_word
-            
-            # También verificar si el wake word es una frase multi-palabra
+            # Frase multi-palabra
             if ' ' in wake_word and wake_word in text:
                 return wake_word
-        
+            # Coincidencia aproximada (Vosk puede decir "asistentes", "persistente", etc.)
+            for w in words_in_text:
+                ratio = SequenceMatcher(None, wake_word, w).ratio()
+                if ratio >= self._fuzzy_threshold:
+                    logger.debug("Fuzzy match: '%s' ≈ '%s' (%.0f%%)", w, wake_word, ratio * 100)
+                    return wake_word
+
         return None
     
     def _handle_error(self, error: Exception) -> None:
