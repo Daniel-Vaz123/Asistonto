@@ -42,5 +42,10 @@
         "iot_control_enabled": true,
         "voice_cache_enabled": true,
         "debug_logging": false
+    },
+    "user_name": "Usuario",
+    "voice_mode": "local",
+    "local": {
+        "vosk_model_path": "model/vosk-model-es-0.42"
     }
 }

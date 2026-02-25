@@ -19,8 +19,10 @@ pip install -r requirements.txt
 
 ### 3. Ejecutar
 
+Desde la carpeta del proyecto (con el venv activado si usas uno):
+
 ```bash
-python src/main.py
+python -m src.main
 ```
 
 ## 🎯 Cómo Usar
@@ -56,6 +58,8 @@ Este script verifica:
 - Micrófono USB
 - Conexión a Internet
 - Cuenta AWS con acceso a Transcribe
+
+**Ejecutar en PC (Windows):** Ver **[EJECUTAR_EN_PC.md](EJECUTAR_EN_PC.md)** para requisitos (PyAudio, .env, ffmpeg) y pasos detallados.
 
 ## 💡 Tips
 

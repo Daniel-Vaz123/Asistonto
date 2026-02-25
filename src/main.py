@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
 
 # Importar componentes del sistema
@@ -29,10 +30,14 @@ from src.transcribe_client import TranscribeStreamingClientWrapper
 from src.wake_word_detector import WakeWordDetector, WakeWordDetection
 from src.command_transcriber import CommandTranscriber, CommandTranscription
 from src.response_generator import ResponseGenerator
+from src.response_generator_local import LocalResponseGenerator
 from src.command_processor import CommandProcessor
 
 # Cargar variables de entorno
 load_dotenv()
+
+# Asegurar que existe la carpeta de logs (para ejecución en PC o Raspberry)
+Path('logs').mkdir(parents=True, exist_ok=True)
 
 # Configurar logging
 log_level = os.getenv('VOICE_ASSISTANT_LOG_LEVEL', 'INFO')
@@ -102,14 +107,14 @@ def print_banner():
 ║    ██║  ██║███████║██║███████║   ██║   ███████╗██║ ╚████║   ██║   ║
 ║    ╚═╝  ╚═╝╚══════╝╚═╝╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═══╝   ╚═╝   ║
 ║                                                                   ║
-║              🎤 Asistente de Voz para Raspberry Pi 🎤             ║
+║              🎤 Asistente de Voz (estilo Alexa) 🎤               ║
 ║                                                                   ║
 ║                    Powered by AWS Transcribe                      ║
 ║                                                                   ║
 ╚═══════════════════════════════════════════════════════════════════╝
 {Colors.RESET}
 {Colors.BRIGHT_WHITE}Versión: 1.0.0 MVP
-Plataforma: Raspberry Pi 4
+Plataforma: PC / Raspberry Pi
 Idioma: Español (es-MX / es-ES)
 {Colors.RESET}
 """
@@ -214,46 +219,76 @@ class VoiceAssistantMVP:
             output_device_index=audio_config.get('output_device_index')
         )
         
-        # 2. Calibrar micrófono
+        # 2. Calibrar micrófono y verificar dispositivo
         print_status("Calibrando micrófono (mantén silencio)...", "processing")
         try:
             calibration = self.audio_manager.calibrate_microphone(duration=2.0)
+            dev_info = calibration.get("device_info", {})
+            mic_name = dev_info.get("name", "Desconocido")
             print_status(
                 f"Micrófono calibrado - Nivel de ruido: {calibration['noise_level']:.2f}",
                 "success"
             )
+            print_status(f"Dispositivo de entrada: {mic_name}", "info")
+            # Listar dispositivos de entrada por si hay que cambiar en config.json (audio.input_device_index)
+            try:
+                devices = self.audio_manager.list_audio_devices()
+                inputs = [d for d in devices if (d.get("max_input_channels") or 0) >= 1]
+                if len(inputs) > 1:
+                    print_status("Otros micrófonos disponibles (config.json → audio.input_device_index):", "info")
+                    for d in inputs[:5]:
+                        print(f"    [{d['index']}] {d.get('name', '?')}")
+            except Exception:
+                pass
         except Exception as e:
             print_status(f"Error al calibrar micrófono: {e}", "error")
             raise
         
-        # 3. Inicializar ResponseGenerator (Amazon Polly)
-        print_status("Inicializando generador de respuestas (Amazon Polly)...", "info")
-        polly_config = self.config['aws']['polly']
-        self.response_generator = ResponseGenerator(
-            audio_manager=self.audio_manager,
-            polly_voice_id=polly_config['voice_id'],
-            output_format=polly_config['output_format'],
-            sample_rate=polly_config['sample_rate'],
-            cache_enabled=self.config['features']['voice_cache_enabled'],
-            region=self.config['aws']['region']
-        )
+        # 3. Inicializar ResponseGenerator (Polly o local pyttsx3)
+        voice_mode = self.config.get("voice_mode") or "aws"
+        if voice_mode == "local":
+            print_status("Inicializando generador de respuestas (local, pyttsx3)...", "info")
+            self.response_generator = LocalResponseGenerator(rate=150, volume=1.0)
+        else:
+            print_status("Inicializando generador de respuestas (Amazon Polly)...", "info")
+            polly_config = self.config['aws']['polly']
+            self.response_generator = ResponseGenerator(
+                audio_manager=self.audio_manager,
+                polly_voice_id=polly_config['voice_id'],
+                output_format=polly_config['output_format'],
+                sample_rate=polly_config['sample_rate'],
+                cache_enabled=self.config['features']['voice_cache_enabled'],
+                region=self.config['aws']['region']
+            )
         
         # 4. Inicializar CommandProcessor
         print_status("Inicializando procesador de comandos...", "info")
+        user_name = self.config.get('user_name') or os.getenv('VOICE_ASSISTANT_USER_NAME', 'Usuario')
         self.command_processor = CommandProcessor(
             response_generator=self.response_generator,
-            user_name="Daniel"  # Personalización para Daniel
+            user_name=user_name
         )
         
-        # 5. Inicializar cliente de AWS Transcribe
-        print_status("Inicializando cliente de AWS Transcribe...", "info")
-        transcribe_config = self.config['aws']['transcribe']
-        self.transcribe_client = TranscribeStreamingClientWrapper(
-            region=self.config['aws']['region'],
-            language_code=transcribe_config['language_code'],
-            sample_rate=transcribe_config['sample_rate'],
-            vocabulary_name=transcribe_config.get('vocabulary_name')
-        )
+        # 5. Inicializar cliente de transcripción (AWS Transcribe o Vosk local)
+        sample_rate = self.config['audio']['sample_rate']
+        if voice_mode == "local":
+            print_status("Inicializando transcripción (Vosk, modo gratuito)...", "info")
+            from src.transcribe_client_vosk import VoskTranscribeStreamingWrapper
+            local_config = self.config.get("local") or {}
+            model_path = local_config.get("vosk_model_path", "model")
+            self.transcribe_client = VoskTranscribeStreamingWrapper(
+                model_path=model_path,
+                sample_rate=sample_rate,
+            )
+        else:
+            print_status("Inicializando cliente de AWS Transcribe...", "info")
+            transcribe_config = self.config['aws']['transcribe']
+            self.transcribe_client = TranscribeStreamingClientWrapper(
+                region=self.config['aws']['region'],
+                language_code=transcribe_config['language_code'],
+                sample_rate=transcribe_config['sample_rate'],
+                vocabulary_name=transcribe_config.get('vocabulary_name')
+            )
         
         # 6. Inicializar WakeWordDetector
         print_status("Inicializando detector de wake words...", "info")
@@ -267,6 +302,9 @@ class VoiceAssistantMVP:
         
         # Registrar callback para wake word detectado
         self.wake_word_detector.on_wake_word_detected(self._on_wake_word_detected)
+        # En modo local, mostrar en consola lo que se escucha (para verificar que el mic funciona)
+        if voice_mode == "local":
+            self.wake_word_detector.on_partial_transcription(self._on_partial_show)
         
         # 7. Inicializar CommandTranscriber
         print_status("Inicializando transcriptor de comandos...", "info")
@@ -301,7 +339,18 @@ class VoiceAssistantMVP:
         print_status("Iniciando captura de audio...", "processing")
         self.audio_manager.start_continuous_capture()
         await asyncio.sleep(0.5)  # Dar tiempo para que el buffer se llene
-        
+        # Prueba rápida: que el usuario hable para ver nivel del mic
+        print_status("Di algo en 2 segundos para probar el micrófono...", "processing")
+        await asyncio.sleep(2.0)
+        chunks = self.audio_manager.get_audio_buffer(num_chunks=32)
+        if chunks:
+            import numpy as np
+            raw = b"".join(chunks)
+            arr = np.frombuffer(raw, dtype=np.int16)
+            rms = float(np.sqrt(np.mean(arr.astype(np.float32) ** 2)))
+            print_status(f"Nivel de micrófono: {rms:.0f} (si es < 300, sube el volumen del mic en Windows)", "info" if rms >= 300 else "warning")
+        else:
+            print_status("No se recibió audio del micrófono. Revisa dispositivo y permisos.", "warning")
         print_status("Iniciando detección de wake words...", "processing")
         print()
         print(f"{Colors.BRIGHT_WHITE}{'='*70}{Colors.RESET}")
@@ -327,22 +376,29 @@ class VoiceAssistantMVP:
         
         print_status("Sistema detenido correctamente", "success")
     
+    def _on_partial_show(self, text: str):
+        """Muestra en consola lo que se está escuchando (modo local, para verificar mic)."""
+        if text and text.strip():
+            print(f"{Colors.YELLOW}  🎤 Escuchando: {text.strip()}{Colors.RESET}", end="\r")
+
     def _on_wake_word_detected(self, detection: WakeWordDetection):
         """
         Callback cuando se detecta un wake word.
+        Retorna la tarea de captura para que el detector espere y no abra dos streams.
         
         Args:
             detection: Información de la detección
         """
+        print()  # Nueva línea para no mezclar con "Escuchando: ..."
         print_status(
             f"WAKE WORD DETECTADO: '{detection.wake_word.upper()}' "
             f"(confianza: {detection.confidence:.0%})",
             "wake_word"
         )
         
-        # Capturar comando después del wake word
+        # Capturar comando después del wake word (misma tarea se espera en el detector)
         print_status("Escuchando comando...", "processing")
-        asyncio.create_task(self._capture_command())
+        return asyncio.create_task(self._capture_command())
     
     async def _capture_command(self):
         """Captura y transcribe un comando después del wake word"""
@@ -403,7 +459,8 @@ class VoiceAssistantMVP:
                     print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}║{' '*68}║{Colors.RESET}")
                     
                     if command_result['spoken']:
-                        print(f"{Colors.BRIGHT_GREEN}║  🔊 Respuesta hablada con Amazon Polly (Voz: Mia){' '*20}║{Colors.RESET}")
+                        tts_name = "voz local (pyttsx3)" if self.config.get("voice_mode") == "local" else "Amazon Polly (Mia)"
+                        print(f"{Colors.BRIGHT_GREEN}║  🔊 Respuesta hablada con {tts_name}{' '*(52-len(tts_name))}║{Colors.RESET}")
                     else:
                         print(f"{Colors.BRIGHT_YELLOW}║  ⚠ Solo texto (error en síntesis de voz){' '*27}║{Colors.RESET}")
                     
@@ -464,7 +521,7 @@ async def main():
     # Imprimir banner
     print_banner()
     
-    print_status("Iniciando Asistente de Voz para Raspberry Pi", "info")
+    print_status("Iniciando Asistente de Voz", "info")
     print()
     
     # Validar credenciales

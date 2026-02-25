@@ -21,7 +21,8 @@ import asyncio
 import logging
 import re
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from difflib import SequenceMatcher
+from typing import Optional, Dict, Any, List, Tuple
 import random
 
 from src.response_generator import ResponseGenerator
@@ -125,6 +126,18 @@ class CommandProcessor:
             ]
         }
     }
+
+    # Frases clave para coincidencia difusa (toleran errores de transcripción tipo "ora"/"hora")
+    FUZZY_PHRASES: Dict[str, List[str]] = {
+        'hora': ['qué hora es', 'dime la hora', 'que hora es', 'cuál es la hora', 'que ora es', 'ora es'],
+        'fecha': ['qué día es', 'qué fecha es', 'fecha', 'día es hoy', 'que dia es', 'que fecha'],
+        'chiste': ['chiste', 'cuéntame un chiste', 'dime un chiste', 'algo gracioso', 'un chiste'],
+        'identidad': ['cómo te llamas', 'quién eres', 'tu nombre', 'preséntate', 'como te llamas'],
+        'estado': ['cómo estás', 'qué tal', 'cómo te va', 'estás bien', 'como estas'],
+        'saludo': ['hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hey', 'ola'],
+        'despedida': ['adiós', 'chao', 'hasta luego', 'gracias', 'bye', 'adios'],
+        'capacidades': ['qué puedes hacer', 'ayuda', 'comandos', 'qué sabes hacer', 'que puedes hacer'],
+    }
     
     # Lista de chistes (se selecciona uno aleatorio)
     JOKES = [
@@ -174,6 +187,7 @@ class CommandProcessor:
     def _match_intent(self, text: str) -> Optional[str]:
         """
         Encuentra la intención que coincide con el texto.
+        Primero intenta regex; si no hay match, usa coincidencia difusa para tolerar errores de transcripción.
         
         Args:
             text: Texto del comando
@@ -183,13 +197,32 @@ class CommandProcessor:
         """
         text_lower = text.lower().strip()
         
+        # 1) Coincidencia exacta con patrones regex
         for intent_name, patterns in self._compiled_patterns.items():
             for pattern in patterns:
                 if pattern.search(text_lower):
                     logger.debug(f"Intención detectada: {intent_name}")
                     return intent_name
         
+        # 2) Coincidencia difusa (transcripción con pequeños errores: "que ora es" -> hora)
+        best_intent, best_ratio = self._fuzzy_match_intent(text_lower)
+        if best_intent and best_ratio >= 0.72:
+            logger.debug(f"Intención detectada por similitud: {best_intent} ({best_ratio:.2f})")
+            return best_intent
+        
         return None
+
+    def _fuzzy_match_intent(self, text: str) -> Tuple[Optional[str], float]:
+        """Devuelve (intent, ratio) con la mejor coincidencia por similitud. Tolera errores de transcripción."""
+        best_intent: Optional[str] = None
+        best_ratio: float = 0.0
+        for intent_name, phrases in self.FUZZY_PHRASES.items():
+            for phrase in phrases:
+                r = SequenceMatcher(None, text, phrase).ratio()
+                if r > best_ratio:
+                    best_ratio = r
+                    best_intent = intent_name
+        return best_intent, best_ratio
     
     def _get_response_for_intent(self, intent_name: str) -> str:
         """

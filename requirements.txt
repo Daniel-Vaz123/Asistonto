@@ -25,3 +25,10 @@ moto>=4.1.0
 
 # Utilities
 python-dotenv>=1.0.0
+
+# Conversión MP3 → PCM para reproducción (respuestas Polly)
+pydub>=0.25.0
+
+# Modo gratuito / local (sin AWS)
+vosk>=0.3.45
+pyttsx3>=2.90

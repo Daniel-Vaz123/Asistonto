@@ -83,7 +83,10 @@ class WakeWordDetector:
         
         # Estado interno
         self._is_detecting = False
+        self._paused = False  # Pausar stream para capturar comando (evitar dos streams)
+        self._pending_command_task = None  # Tarea de captura para await tras el stream
         self._detection_callback: Optional[Callable[[WakeWordDetection], None]] = None
+        self._on_partial_callback: Optional[Callable[[str], None]] = None  # Para mostrar en consola lo que se escucha
         self._last_detection_time: Optional[float] = None
         self._recent_transcriptions: List[str] = []
         
@@ -92,15 +95,25 @@ class WakeWordDetector:
             f"threshold={confidence_threshold}"
         )
     
+    def pause(self) -> None:
+        """Pausa el stream de audio para permitir usar el cliente en captura de comando."""
+        self._paused = True
+        logger.debug("Detección pausada (captura de comando)")
+
     def on_wake_word_detected(self, callback: Callable[[WakeWordDetection], None]) -> None:
         """
         Registra un callback para cuando se detecte un wake word.
+        El callback puede retornar un Awaitable (ej. Task) que se esperará tras cerrar el stream.
         
         Args:
             callback: Función a llamar cuando se detecte wake word
         """
         self._detection_callback = callback
         logger.debug("Callback de detección registrado")
+
+    def on_partial_transcription(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Registra un callback para transcripciones parciales (para mostrar en consola lo que se escucha)."""
+        self._on_partial_callback = callback
     
     async def start_detection(self) -> None:
         """
@@ -127,6 +140,8 @@ class WakeWordDetector:
         try:
             while self._is_detecting:
                 try:
+                    self._paused = False
+                    self._pending_command_task = None
                     # Crear generador de audio asíncrono
                     audio_stream = self._create_audio_stream()
                     
@@ -136,6 +151,16 @@ class WakeWordDetector:
                         on_transcription=self._handle_transcription,
                         on_error=self._handle_error
                     )
+                    
+                    # Si se pausó para capturar comando, esperar a que termine
+                    if self._pending_command_task is not None:
+                        try:
+                            await asyncio.shield(self._pending_command_task)
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as e:
+                            logger.error(f"Error en captura de comando: {e}")
+                        self._pending_command_task = None
                     
                 except Exception as e:
                     logger.error(f"Error en stream de detección: {e}")
@@ -171,7 +196,7 @@ class WakeWordDetector:
             Chunks de audio en formato PCM
         """
         try:
-            while self._is_detecting:
+            while self._is_detecting and not self._paused:
                 # Obtener chunk de audio del AudioManager
                 audio_chunk = self.audio_manager.get_audio_chunk(timeout=0.1)
                 
@@ -233,17 +258,21 @@ class WakeWordDetector:
                         f"(confianza: {transcription.confidence:.2f})"
                     )
                     
-                    # Notificar callback
+                    # Pausar stream para liberar el cliente y permitir captura de comando
+                    self._paused = True
+                    # Notificar callback; si retorna un Awaitable (Task/Coroutine), lo esperamos tras cerrar el stream
                     if self._detection_callback:
-                        if asyncio.iscoroutinefunction(self._detection_callback):
-                            asyncio.create_task(self._detection_callback(detection))
-                        else:
-                            self._detection_callback(detection)
+                        result = self._detection_callback(detection)
+                        if result is not None and (asyncio.iscoroutine(result) or isinstance(result, asyncio.Task)):
+                            self._pending_command_task = asyncio.ensure_future(result)
                 else:
                     logger.debug(
                         f"Wake word detectado pero ignorado (muy reciente): '{detected_word}'"
                     )
             
+            # Callback para mostrar en consola lo que se escucha (útil para verificar micrófono)
+            if transcription.is_partial and self._on_partial_callback and text_lower:
+                self._on_partial_callback(transcription.text)
             # Log de transcripciones para debugging
             if transcription.is_partial:
                 logger.debug(f"Transcripción parcial: '{transcription.text}'")

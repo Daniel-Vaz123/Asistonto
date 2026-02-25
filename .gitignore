@@ -41,6 +41,7 @@ ENV/
 Thumbs.db
 
 # Project specific
+model/
 data/*.db
 data/*.db-journal
 logs/*.log
