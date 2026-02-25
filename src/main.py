@@ -28,6 +28,8 @@ from src.audio_manager import AudioManager
 from src.transcribe_client import TranscribeStreamingClientWrapper
 from src.wake_word_detector import WakeWordDetector, WakeWordDetection
 from src.command_transcriber import CommandTranscriber, CommandTranscription
+from src.response_generator import ResponseGenerator
+from src.command_processor import CommandProcessor
 
 # Cargar variables de entorno
 load_dotenv()
@@ -193,6 +195,8 @@ class VoiceAssistantMVP:
         self.transcribe_client: Optional[TranscribeStreamingClientWrapper] = None
         self.wake_word_detector: Optional[WakeWordDetector] = None
         self.command_transcriber: Optional[CommandTranscriber] = None
+        self.response_generator: Optional[ResponseGenerator] = None
+        self.command_processor: Optional[CommandProcessor] = None
         self._is_running = False
         
     async def initialize(self):
@@ -222,7 +226,26 @@ class VoiceAssistantMVP:
             print_status(f"Error al calibrar micrófono: {e}", "error")
             raise
         
-        # 3. Inicializar cliente de AWS Transcribe
+        # 3. Inicializar ResponseGenerator (Amazon Polly)
+        print_status("Inicializando generador de respuestas (Amazon Polly)...", "info")
+        polly_config = self.config['aws']['polly']
+        self.response_generator = ResponseGenerator(
+            audio_manager=self.audio_manager,
+            polly_voice_id=polly_config['voice_id'],
+            output_format=polly_config['output_format'],
+            sample_rate=polly_config['sample_rate'],
+            cache_enabled=self.config['features']['voice_cache_enabled'],
+            region=self.config['aws']['region']
+        )
+        
+        # 4. Inicializar CommandProcessor
+        print_status("Inicializando procesador de comandos...", "info")
+        self.command_processor = CommandProcessor(
+            response_generator=self.response_generator,
+            user_name="Daniel"  # Personalización para Daniel
+        )
+        
+        # 5. Inicializar cliente de AWS Transcribe
         print_status("Inicializando cliente de AWS Transcribe...", "info")
         transcribe_config = self.config['aws']['transcribe']
         self.transcribe_client = TranscribeStreamingClientWrapper(
@@ -232,7 +255,7 @@ class VoiceAssistantMVP:
             vocabulary_name=transcribe_config.get('vocabulary_name')
         )
         
-        # 4. Inicializar WakeWordDetector
+        # 6. Inicializar WakeWordDetector
         print_status("Inicializando detector de wake words...", "info")
         wake_words = self.config['wake_words']
         self.wake_word_detector = WakeWordDetector(
@@ -245,7 +268,7 @@ class VoiceAssistantMVP:
         # Registrar callback para wake word detectado
         self.wake_word_detector.on_wake_word_detected(self._on_wake_word_detected)
         
-        # 5. Inicializar CommandTranscriber
+        # 7. Inicializar CommandTranscriber
         print_status("Inicializando transcriptor de comandos...", "info")
         self.command_transcriber = CommandTranscriber(
             audio_manager=self.audio_manager,
@@ -262,6 +285,14 @@ class VoiceAssistantMVP:
         )
         
         print_status("Sistema inicializado correctamente", "success")
+        
+        # Mostrar estadísticas de cache
+        cache_stats = self.response_generator.get_cache_stats()
+        print_status(
+            f"Cache de voz: {cache_stats['total_requests']} solicitudes, "
+            f"{cache_stats['hit_rate_percent']}% hit rate",
+            "info"
+        )
     
     async def start(self):
         """Inicia el asistente de voz"""
@@ -333,6 +364,55 @@ class VoiceAssistantMVP:
                 print(f"{Colors.BRIGHT_WHITE}{'='*70}{Colors.RESET}")
                 print()
                 
+                # Procesar comando con el CommandProcessor
+                print_status("Procesando comando...", "processing")
+                command_result = await self.command_processor.process_command(
+                    result.text,
+                    speak=True  # Hablar la respuesta
+                )
+                
+                if command_result['success']:
+                    # Mostrar respuesta en consola con formato elegante tipo banner
+                    print()
+                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}╔{'═'*68}╗{Colors.RESET}")
+                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}║{' '*68}║{Colors.RESET}")
+                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}║  🤖 KIRO RESPONDE:{' '*50}║{Colors.RESET}")
+                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}║{' '*68}║{Colors.RESET}")
+                    
+                    # Dividir respuesta en líneas si es muy larga
+                    response_text = command_result['response_text']
+                    max_width = 64
+                    words = response_text.split()
+                    lines = []
+                    current_line = ""
+                    
+                    for word in words:
+                        if len(current_line) + len(word) + 1 <= max_width:
+                            current_line += (word + " ")
+                        else:
+                            lines.append(current_line.strip())
+                            current_line = word + " "
+                    if current_line:
+                        lines.append(current_line.strip())
+                    
+                    # Imprimir cada línea centrada en el banner
+                    for line in lines:
+                        padding = (64 - len(line)) // 2
+                        print(f"{Colors.BRIGHT_WHITE}║  {' '*padding}{line}{' '*(64-len(line)-padding)}  ║{Colors.RESET}")
+                    
+                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}║{' '*68}║{Colors.RESET}")
+                    
+                    if command_result['spoken']:
+                        print(f"{Colors.BRIGHT_GREEN}║  🔊 Respuesta hablada con Amazon Polly (Voz: Mia){' '*20}║{Colors.RESET}")
+                    else:
+                        print(f"{Colors.BRIGHT_YELLOW}║  ⚠ Solo texto (error en síntesis de voz){' '*27}║{Colors.RESET}")
+                    
+                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}║{' '*68}║{Colors.RESET}")
+                    print(f"{Colors.BRIGHT_CYAN}{Colors.BOLD}╚{'═'*68}╝{Colors.RESET}")
+                    print()
+                else:
+                    print_status("Error procesando comando", "error")
+                
                 # Volver a escuchar wake word
                 print_status(
                     f"Esperando wake word '{self.config['wake_words'][0]}'...",
@@ -347,6 +427,7 @@ class VoiceAssistantMVP:
                 
         except Exception as e:
             print_status(f"Error capturando comando: {e}", "error")
+            logger.error(f"Error en _capture_command: {e}", exc_info=True)
     
     def _on_partial_transcription(self, text: str):
         """

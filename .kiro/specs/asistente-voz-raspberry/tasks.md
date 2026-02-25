@@ -123,14 +123,14 @@ Este plan de implementación desglosa el desarrollo del asistente de voz en tare
     - Probar que se solicita aclaración cuando confianza < 0.8
     - _Requisitos: 3.3_
 
-- [ ] 8. Implementar Command Processor
-  - [ ] 8.1 Crear clase CommandProcessor
+- [x] 8. Implementar Command Processor
+  - [x] 8.1 Crear clase CommandProcessor
     - Integrar con Amazon Lex para extracción de intenciones
     - Implementar routing de intenciones a handlers específicos
     - Manejar respuestas y errores
     - _Requisitos: 3.1, 3.4_
   
-  - [ ] 8.2 Implementar handlers para intenciones básicas
+  - [x] 8.2 Implementar handlers para intenciones básicas
     - Handler para ConsultarHora (retorna hora actual)
     - Handler para ConsultarClima (placeholder)
     - Handler para ConsultarNoticias (placeholder)
@@ -141,20 +141,20 @@ Este plan de implementación desglosa el desarrollo del asistente de voz en tare
     - Probar manejo de intenciones no reconocidas
     - _Requisitos: 4.1_
 
-- [ ] 9. Implementar integración con AWS Polly
-  - [ ] 9.1 Crear clase ResponseGenerator con AWS Polly
+- [x] 9. Implementar integración con AWS Polly
+  - [x] 9.1 Crear clase ResponseGenerator con AWS Polly
     - Configurar boto3 para AWS Polly
     - Implementar síntesis de texto a voz
     - Configurar voz en español (Lupe o Mia)
     - _Requisitos: 7.1_
   
-  - [ ] 9.2 Implementar cache de respuestas comunes
+  - [x] 9.2 Implementar cache de respuestas comunes
     - Crear sistema de cache en memoria y disco
     - Implementar lógica de cache hit/miss
     - Configurar TTL para entradas de cache
     - _Requisitos: 7.5_
   
-  - [ ] 9.3 Integrar reproducción de respuestas con AudioManager
+  - [x] 9.3 Integrar reproducción de respuestas con AudioManager
     - Conectar audio sintetizado con AudioManager.play_audio()
     - Implementar retorno a modo de escucha después de reproducción
     - _Requisitos: 7.2, 7.4_

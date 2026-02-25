@@ -7,7 +7,7 @@
             "vocabulary_name": "voice-assistant-vocab"
         },
         "polly": {
-            "voice_id": "Lupe",
+            "voice_id": "Mia",
             "output_format": "mp3",
             "sample_rate": "22050"
         },
