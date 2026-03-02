@@ -1,8 +1,9 @@
 """
-Punto de entrada principal del Asistente de Voz (PC o Raspberry Pi).
+Punto de entrada principal del Asistente de Voz "Kiro".
 
-Orquesta los componentes del sistema: captura de audio, detección de wake word
-y transcripción en tiempo real con AWS Transcribe, respuestas con Amazon Polly.
+Orquesta los componentes: captura de audio (PyAudio), detección de wake word,
+transcripción con Vosk (offline), procesamiento de comandos (regex + DeepSeek),
+y respuesta hablada con Amazon Polly.
 
 Flujo: captura continua → wake word → comando por voz → procesamiento → respuesta hablada.
 """
@@ -16,9 +17,7 @@ from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 
-# Importar componentes del sistema
 from src.audio_manager import AudioManager
-from src.transcribe_client import TranscribeStreamingClientWrapper
 from src.wake_word_detector import WakeWordDetector, WakeWordDetection
 from src.command_transcriber import CommandTranscriber, CommandTranscription
 from src.response_generator import ResponseGenerator
@@ -243,7 +242,8 @@ class VoiceAssistantMVP:
             output_format=polly_config['output_format'],
             sample_rate=polly_config['sample_rate'],
             cache_enabled=self.config['features']['voice_cache_enabled'],
-            region=self.config['aws']['region']
+            region=self.config['aws']['region'],
+            volume_gain=float(polly_config.get('volume_gain', 3.0))
         )
         
         # 4. Inicializar CommandProcessor
@@ -266,7 +266,9 @@ class VoiceAssistantMVP:
                 buffer_ms=float(vosk_cfg.get("buffer_ms", 300)),
             )
         else:
+            # FUTURA IMPLEMENTACIÓN — AWS Transcribe (ver MIGRACION_AWS.md)
             print_status("Inicializando cliente de AWS Transcribe...", "info")
+            from src.transcribe_client import TranscribeStreamingClientWrapper
             transcribe_config = self.config['aws']['transcribe']
             self.transcribe_client = TranscribeStreamingClientWrapper(
                 region=self.config['aws']['region'],

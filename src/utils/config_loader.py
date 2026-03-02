@@ -14,9 +14,10 @@ class ConfigLoader:
     
     REQUIRED_AWS_KEYS = [
         'aws.region',
-        'aws.transcribe.language_code',
         'aws.polly.voice_id',
-        'aws.lex.bot_name',
+        # FUTURA IMPLEMENTACIÓN: descomentar al activar estos servicios
+        # 'aws.transcribe.language_code',  # AWS Transcribe (actualmente se usa Vosk)
+        # 'aws.lex.bot_name',              # Amazon Lex (NLU avanzado)
     ]
     
     def __init__(self, config_path: str = 'config.json'):

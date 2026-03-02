@@ -1,30 +1,42 @@
 {
     "aws": {
         "region": "us-east-1",
+
+        "polly": {
+            "_comment": "EN USO — Síntesis de voz (TTS)",
+            "voice_id": "Mia",
+            "output_format": "pcm",
+            "sample_rate": "16000",
+            "volume_gain": 3.0
+        },
+
         "transcribe": {
+            "_comment": "FUTURA IMPLEMENTACIÓN — Actualmente se usa Vosk. Ver MIGRACION_AWS.md",
             "language_code": "es-ES",
             "sample_rate": 16000,
             "vocabulary_name": "voice-assistant-vocab"
         },
-        "polly": {
-            "voice_id": "Mia",
-            "output_format": "pcm",
-            "sample_rate": "16000"
-        },
+
         "lex": {
+            "_comment": "FUTURA IMPLEMENTACIÓN — NLU avanzado con Amazon Lex",
             "bot_name": "VoiceAssistantBot",
             "bot_alias": "PROD",
             "locale_id": "es_ES"
         },
+
         "iot": {
+            "_comment": "FUTURA IMPLEMENTACIÓN — Control de dispositivos IoT",
             "thing_name": "raspberry-voice-assistant",
             "endpoint": "your-iot-endpoint.amazonaws.com"
         },
+
         "dynamodb": {
+            "_comment": "FUTURA IMPLEMENTACIÓN — Base de datos en la nube",
             "table_name": "voice-assistant-data",
             "region": "us-east-1"
         }
     },
+
     "audio": {
         "sample_rate": 16000,
         "chunk_size": 4000,
@@ -32,18 +44,24 @@
         "input_device_index": null,
         "output_device_index": null
     },
+
     "wake_words": ["asistente", "alexa", "hola asistente"],
+
     "session": {
+        "_comment": "FUTURA IMPLEMENTACIÓN — Se activará con session_manager.py",
         "timeout_seconds": 30,
         "max_command_length_seconds": 10
     },
+
     "features": {
-        "cloud_sync_enabled": true,
-        "iot_control_enabled": true,
         "voice_cache_enabled": true,
-        "debug_logging": false
+        "debug_logging": false,
+        "cloud_sync_enabled": false,
+        "iot_control_enabled": false
     },
+
     "user_name": "Alejandro",
+
     "transcribe_provider": "vosk",
     "vosk": {
         "model_path": "model/vosk-model-small-es-0.42",
