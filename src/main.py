@@ -23,9 +23,33 @@ from src.wake_word_detector import WakeWordDetector, WakeWordDetection
 from src.command_transcriber import CommandTranscriber, CommandTranscription
 from src.response_generator import ResponseGenerator
 from src.command_processor import CommandProcessor
+from src.feedback_preventer import FeedbackPreventer
 
 # Cargar variables de entorno
 load_dotenv()
+
+
+def verify_phase2_dependencies():
+    """Verifica que las dependencias de Fase 2 estén instaladas"""
+    try:
+        import duckduckgo_search
+    except ImportError:
+        print("ERROR: duckduckgo-search no está instalado")
+        print("Instala con: pip install duckduckgo-search>=4.0.0")
+        sys.exit(1)
+    
+    try:
+        import rich
+    except ImportError:
+        print("ERROR: rich no está instalado")
+        print("Instala con: pip install rich>=13.0.0")
+        sys.exit(1)
+    
+    print("✓ Dependencias de Fase 2 verificadas")
+
+
+# Verificar dependencias al inicio
+verify_phase2_dependencies()
 
 # Asegurar que existe la carpeta de logs (para ejecución en PC o Raspberry)
 Path('logs').mkdir(parents=True, exist_ok=True)
@@ -192,11 +216,22 @@ class VoiceAssistantMVP:
         self.command_transcriber: Optional[CommandTranscriber] = None
         self.response_generator: Optional[ResponseGenerator] = None
         self.command_processor: Optional[CommandProcessor] = None
+        self.feedback_preventer: Optional[FeedbackPreventer] = None  # Phase 3: Auto-Mute
         self._is_running = False
         
     async def initialize(self):
         """Inicializa todos los componentes del sistema"""
         print_status("Inicializando componentes del sistema...", "processing")
+        
+        # Phase 2: Mostrar banner de RichUI
+        from src.rich_ui_manager import RichUIManager
+        from src.models import SystemState
+        ui_manager = RichUIManager()
+        ui_manager.show_banner()
+        
+        # Phase 3: Inicializar FeedbackPreventer (Auto-Mute)
+        print_status("Inicializando prevención de feedback...", "info")
+        self.feedback_preventer = FeedbackPreventer()
         
         # 1. Inicializar AudioManager
         print_status("Inicializando AudioManager...", "info")
@@ -243,7 +278,8 @@ class VoiceAssistantMVP:
             output_format=polly_config['output_format'],
             sample_rate=polly_config['sample_rate'],
             cache_enabled=self.config['features']['voice_cache_enabled'],
-            region=self.config['aws']['region']
+            region=self.config['aws']['region'],
+            feedback_preventer=self.feedback_preventer  # Phase 3: Pasar FeedbackPreventer
         )
         
         # 4. Inicializar CommandProcessor
@@ -251,7 +287,8 @@ class VoiceAssistantMVP:
         user_name = self.config.get('user_name') or os.getenv('VOICE_ASSISTANT_USER_NAME', 'Usuario')
         self.command_processor = CommandProcessor(
             response_generator=self.response_generator,
-            user_name=user_name
+            user_name=user_name,
+            web_search_enabled=True  # Phase 2: Habilitar búsqueda web
         )
         
         # 5. Inicializar cliente de transcripción (AWS, Google o Vosk local)
@@ -282,7 +319,8 @@ class VoiceAssistantMVP:
             wake_words=wake_words,
             audio_manager=self.audio_manager,
             transcribe_client=self.transcribe_client,
-            confidence_threshold=0.7
+            confidence_threshold=0.7,
+            feedback_preventer=self.feedback_preventer  # Phase 3: Pasar FeedbackPreventer
         )
         
         # Registrar callbacks
@@ -295,7 +333,8 @@ class VoiceAssistantMVP:
             audio_manager=self.audio_manager,
             transcribe_client=self.transcribe_client,
             silence_threshold=1.5,
-            max_command_duration=10.0
+            max_command_duration=10.0,
+            feedback_preventer=self.feedback_preventer  # Phase 3: Pasar FeedbackPreventer
         )
         
         # Configurar callbacks para transcripción
@@ -303,6 +342,16 @@ class VoiceAssistantMVP:
             on_partial=self._on_partial_transcription,
             on_final=self._on_final_transcription,
             on_error=self._on_transcription_error
+        )
+        
+        # 8. Inicializar TranscriptionFilter
+        print_status("Inicializando filtro de transcripciones...", "info")
+        from src.transcription_filter import TranscriptionFilter
+        wake_words = self.config['wake_words']
+        self.transcription_filter = TranscriptionFilter(
+            wake_words=wake_words,
+            min_words=2,
+            min_chars=4
         )
         
         print_status("Sistema inicializado correctamente", "success")
@@ -359,6 +408,10 @@ class VoiceAssistantMVP:
         if self.wake_word_detector:
             await self.wake_word_detector.stop_detection()
         
+        # Phase 2: Cleanup de threading
+        if self.command_processor and hasattr(self.command_processor, 'threading_manager'):
+            self.command_processor.threading_manager.shutdown()
+        
         if self.audio_manager:
             self.audio_manager.stop_continuous_capture()
             self.audio_manager.cleanup()
@@ -397,25 +450,44 @@ class VoiceAssistantMVP:
             return asyncio.create_task(self._capture_command())
 
     async def _process_inline_command(self, command_text: str):
-        """Procesa un comando que vino pegado al wake word (ej. 'asistente qué hora es')."""
-        try:
-            print(f"{Colors.BRIGHT_WHITE}  💬 Tú dijiste: \"{command_text}\"{Colors.RESET}")
+            """Procesa un comando que vino pegado al wake word (ej. 'asistente qué hora es')."""
+            try:
+                # Aplicar filtro de transcripción también a comandos inline
+                filtered_text = self.transcription_filter.filter(command_text)
+
+                if filtered_text is None:
+                    # Comando inline rechazado por el filtro
+                    logger.debug("Inline command rejected by filter, returning to listening state")
+                    print()
+                    print(f"{Colors.BRIGHT_BLACK}  {'─'*60}{Colors.RESET}")
+                    ww = self.config['wake_words'][0].upper()
+                    print(f"{Colors.BRIGHT_GREEN}  🎤 Escuchando... di '{ww}' para activarme{Colors.RESET}")
+                    print()
+                    return
+
+                # Mostrar texto filtrado (sin wake word)
+                print(f"{Colors.BRIGHT_WHITE}  💬 Tú dijiste: \"{filtered_text}\"{Colors.RESET}")
+                print()
+
+                # Procesar comando con texto filtrado
+                command_result = await self.command_processor.process_command(filtered_text, speak=True)
+
+                if command_result['success']:
+                    print(f"{Colors.BRIGHT_CYAN}  🤖 Kiro: {command_result['response_text']}{Colors.RESET}")
+                    if command_result.get('spoken'):
+                        print(f"{Colors.BRIGHT_BLACK}     (hablado con Polly){Colors.RESET}")
+                else:
+                    print(f"{Colors.BRIGHT_RED}  ✗ No pude procesar el comando.{Colors.RESET}")
+            except Exception as e:
+                print_status(f"Error procesando comando: {e}", "error")
+                logger.error("Error en _process_inline_command: %s", e, exc_info=True)
             print()
-            command_result = await self.command_processor.process_command(command_text, speak=True)
-            if command_result['success']:
-                print(f"{Colors.BRIGHT_CYAN}  🤖 Kiro: {command_result['response_text']}{Colors.RESET}")
-                if command_result.get('spoken'):
-                    print(f"{Colors.BRIGHT_BLACK}     (hablado con Polly){Colors.RESET}")
-            else:
-                print(f"{Colors.BRIGHT_RED}  ✗ No pude procesar el comando.{Colors.RESET}")
-        except Exception as e:
-            print_status(f"Error procesando comando: {e}", "error")
-            logger.error("Error en _process_inline_command: %s", e, exc_info=True)
-        print()
-        print(f"{Colors.BRIGHT_BLACK}  {'─'*60}{Colors.RESET}")
-        ww = self.config['wake_words'][0].upper()
-        print(f"{Colors.BRIGHT_GREEN}  🎤 Escuchando... di '{ww}' para activarme{Colors.RESET}")
-        print()
+            print(f"{Colors.BRIGHT_BLACK}  {'─'*60}{Colors.RESET}")
+            ww = self.config['wake_words'][0].upper()
+            print(f"{Colors.BRIGHT_GREEN}  🎤 Escuchando... di '{ww}' para activarme{Colors.RESET}")
+            print()
+
+
 
     async def _capture_command(self):
         """Captura comando, lo procesa y responde."""
@@ -426,11 +498,25 @@ class VoiceAssistantMVP:
             print("\r" + " " * 80, end="\r")
 
             if result and result.text.strip():
-                print(f"{Colors.BRIGHT_WHITE}  💬 Tú dijiste: \"{result.text}\"{Colors.RESET}")
+                # Aplicar filtro de transcripción
+                filtered_text = self.transcription_filter.filter(result.text)
+                
+                if filtered_text is None:
+                    # Transcripción rechazada, volver a escuchar silenciosamente
+                    logger.debug("Transcription rejected by filter, returning to listening state")
+                    print()
+                    print(f"{Colors.BRIGHT_BLACK}  {'─'*60}{Colors.RESET}")
+                    ww = self.config['wake_words'][0].upper()
+                    print(f"{Colors.BRIGHT_GREEN}  🎤 Escuchando... di '{ww}' para activarme{Colors.RESET}")
+                    print()
+                    return
+                
+                # Mostrar texto filtrado (sin wake word)
+                print(f"{Colors.BRIGHT_WHITE}  💬 Tú dijiste: \"{filtered_text}\"{Colors.RESET}")
                 print()
 
                 command_result = await self.command_processor.process_command(
-                    result.text, speak=True
+                    filtered_text, speak=True
                 )
 
                 if command_result['success']:

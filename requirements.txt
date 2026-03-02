@@ -19,3 +19,11 @@ openai>=1.0.0
 
 # Utilidades
 python-dotenv>=1.0.0
+
+# Fase 2: Web Search, Rich UI, Threading
+duckduckgo-search>=4.0.0    # Búsqueda en internet
+rich>=13.0.0                 # Interfaz de consola rica
+hypothesis>=6.0.0            # Property-based testing
+
+# Fase 3: System Actions, Memory, Feedback Prevention
+pywhatkit>=5.4               # YouTube playback y acciones del sistema

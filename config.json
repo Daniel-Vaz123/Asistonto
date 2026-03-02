@@ -43,7 +43,7 @@
         "voice_cache_enabled": true,
         "debug_logging": false
     },
-    "user_name": "Alejandro",
+    "user_name": "Daniel Vazquez Salazar",
     "transcribe_provider": "vosk",
     "vosk": {
         "model_path": "model/vosk-model-small-es-0.42",
