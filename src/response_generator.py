@@ -263,24 +263,20 @@ class ResponseGenerator:
             return False
         
         try:
-            # Generar audio
             audio_data = await self.generate_speech(text)
             
             if not audio_data:
                 logger.warning("No se pudo generar audio, fallback a solo texto")
                 return False
             
-            # Reproducir audio
-            # Nota: Para MP3 necesitamos convertir a PCM primero
             if self.output_format == "mp3":
                 audio_data = self._convert_mp3_to_pcm(audio_data)
+                if not audio_data:
+                    return False
             
-            if audio_data:
-                self.audio_manager.play_audio(audio_data, block=block)
-                logger.info("Audio reproducido correctamente")
-                return True
-            else:
-                return False
+            self.audio_manager.play_audio(audio_data, block=block)
+            logger.info("Audio reproducido correctamente")
+            return True
                 
         except Exception as e:
             logger.error(f"Error reproduciendo audio: {e}")

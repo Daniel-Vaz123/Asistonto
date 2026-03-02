@@ -19,10 +19,14 @@ Requisitos implementados:
 
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from difflib import SequenceMatcher
+from typing import Optional, Dict, Any, List, Tuple
 import random
+
+from openai import OpenAI
 
 from src.response_generator import ResponseGenerator
 
@@ -118,12 +122,24 @@ class CommandProcessor:
                 r'\b(funciones|capacidades)\b'
             ],
             'responses': [
-                'Puedo decirte la hora, la fecha, contarte chistes, y responder preguntas sobre mí. '
-                '¿Qué te gustaría saber, {user}?',
-                'Mis funciones incluyen: decir la hora, dar la fecha, contar chistes, y conversar contigo. '
+                'Puedo decirte la hora, la fecha, contarte chistes, y responder cualquier pregunta general gracias a mi conexión con inteligencia artificial. '
+                '¡Pregúntame lo que quieras, {user}!',
+                'Mis funciones incluyen: decir la hora, dar la fecha, contar chistes, y responder preguntas de cualquier tema. '
                 '¿En qué puedo ayudarte, {user}?'
             ]
         }
+    }
+
+    # Frases clave para coincidencia difusa (toleran errores de transcripción tipo "ora"/"hora")
+    FUZZY_PHRASES: Dict[str, List[str]] = {
+        'hora': ['qué hora es', 'dime la hora', 'que hora es', 'cuál es la hora', 'que ora es', 'ora es'],
+        'fecha': ['qué día es', 'qué fecha es', 'fecha', 'día es hoy', 'que dia es', 'que fecha'],
+        'chiste': ['chiste', 'cuéntame un chiste', 'dime un chiste', 'algo gracioso', 'un chiste'],
+        'identidad': ['cómo te llamas', 'quién eres', 'tu nombre', 'preséntate', 'como te llamas'],
+        'estado': ['cómo estás', 'qué tal', 'cómo te va', 'estás bien', 'como estas'],
+        'saludo': ['hola', 'buenos días', 'buenas tardes', 'buenas noches', 'hey', 'ola'],
+        'despedida': ['adiós', 'chao', 'hasta luego', 'gracias', 'bye', 'adios'],
+        'capacidades': ['qué puedes hacer', 'ayuda', 'comandos', 'qué sabes hacer', 'que puedes hacer'],
     }
     
     # Lista de chistes (se selecciona uno aleatorio)
@@ -166,6 +182,18 @@ class CommandProcessor:
                 for pattern in intent_data['patterns']
             ]
         
+        # Cliente de DeepSeek para preguntas generales
+        deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+        if deepseek_key:
+            self._llm_client = OpenAI(
+                api_key=deepseek_key,
+                base_url="https://api.deepseek.com"
+            )
+            logger.info("DeepSeek configurado como fallback para preguntas generales")
+        else:
+            self._llm_client = None
+            logger.warning("DEEPSEEK_API_KEY no encontrada; preguntas generales deshabilitadas")
+        
         logger.info(
             f"CommandProcessor inicializado: {len(self.INTENTS)} intenciones, "
             f"usuario={user_name}"
@@ -174,6 +202,7 @@ class CommandProcessor:
     def _match_intent(self, text: str) -> Optional[str]:
         """
         Encuentra la intención que coincide con el texto.
+        Primero intenta regex; si no hay match, usa coincidencia difusa para tolerar errores de transcripción.
         
         Args:
             text: Texto del comando
@@ -183,20 +212,40 @@ class CommandProcessor:
         """
         text_lower = text.lower().strip()
         
+        # 1) Coincidencia exacta con patrones regex
         for intent_name, patterns in self._compiled_patterns.items():
             for pattern in patterns:
                 if pattern.search(text_lower):
                     logger.debug(f"Intención detectada: {intent_name}")
                     return intent_name
         
+        # 2) Coincidencia difusa (transcripción con pequeños errores: "que ora es" -> hora)
+        best_intent, best_ratio = self._fuzzy_match_intent(text_lower)
+        if best_intent and best_ratio >= 0.72:
+            logger.debug(f"Intención detectada por similitud: {best_intent} ({best_ratio:.2f})")
+            return best_intent
+        
         return None
+
+    def _fuzzy_match_intent(self, text: str) -> Tuple[Optional[str], float]:
+        """Devuelve (intent, ratio) con la mejor coincidencia por similitud. Tolera errores de transcripción."""
+        best_intent: Optional[str] = None
+        best_ratio: float = 0.0
+        for intent_name, phrases in self.FUZZY_PHRASES.items():
+            for phrase in phrases:
+                r = SequenceMatcher(None, text, phrase).ratio()
+                if r > best_ratio:
+                    best_ratio = r
+                    best_intent = intent_name
+        return best_intent, best_ratio
     
-    def _get_response_for_intent(self, intent_name: str) -> str:
+    def _get_response_for_intent(self, intent_name: str, original_text: str = "") -> str:
         """
         Obtiene una respuesta para la intención.
         
         Args:
             intent_name: Nombre de la intención
+            original_text: Texto original del comando (para fallback con Gemini)
             
         Returns:
             Texto de respuesta
@@ -204,7 +253,7 @@ class CommandProcessor:
         intent_data = self.INTENTS.get(intent_name)
         
         if not intent_data:
-            return self._get_fallback_response()
+            return self._get_fallback_response(original_text)
         
         # Si tiene handler dinámico, llamarlo
         if intent_data.get('dynamic') and intent_data.get('handler'):
@@ -218,21 +267,51 @@ class CommandProcessor:
         responses = intent_data.get('responses', [])
         if responses:
             response = random.choice(responses)
-            # Reemplazar placeholder de usuario
             return response.format(user=self.user_name)
         
-        return self._get_fallback_response()
+        return self._get_fallback_response(original_text)
     
-    def _get_fallback_response(self) -> str:
+    def _ask_llm(self, question: str) -> Optional[str]:
+        """Consulta a DeepSeek para responder preguntas de conocimiento general."""
+        if not self._llm_client:
+            return None
+        try:
+            response = self._llm_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"Eres Kiro, un asistente de voz amigable. El usuario se llama {self.user_name}. "
+                            "Responde de forma breve y natural (máximo 2-3 oraciones, como si hablaras en voz alta). "
+                            "No uses markdown, emojis, ni formato especial. Solo texto plano."
+                        )
+                    },
+                    {"role": "user", "content": question}
+                ],
+                max_tokens=150,
+                temperature=0.7,
+            )
+            text = response.choices[0].message.content.strip() if response.choices else None
+            if text:
+                logger.info("DeepSeek respondió correctamente")
+            return text
+        except Exception as e:
+            logger.error("Error consultando DeepSeek: %s", e)
+            return None
+
+    def _get_fallback_response(self, original_text: str = "") -> str:
         """
-        Obtiene respuesta de fallback para comandos no reconocidos.
-        
-        Returns:
-            Texto de respuesta de fallback
+        Intenta responder con DeepSeek; si falla, usa respuesta genérica.
         """
+        if original_text:
+            llm_answer = self._ask_llm(original_text)
+            if llm_answer:
+                return llm_answer
+
         return (
-            f'Lo siento, {self.user_name}, aún no tengo programada esa función, '
-            'pero puedo ayudarte con la hora, la fecha, o contarte un chiste.'
+            f'Lo siento, {self.user_name}, no pude encontrar una respuesta. '
+            'Puedo ayudarte con la hora, la fecha, contarte un chiste, o hacerme preguntas generales.'
         )
     
     def get_current_time(self) -> str:
@@ -338,11 +417,11 @@ class CommandProcessor:
         intent = self._match_intent(command_text)
         
         if not intent:
-            logger.info("No se detectó intención específica, usando fallback")
+            logger.info("No se detectó intención específica, consultando Gemini")
             intent = 'unknown'
         
         # Generar respuesta
-        response_text = self._get_response_for_intent(intent)
+        response_text = self._get_response_for_intent(intent, original_text=command_text)
         
         logger.info(f"Respuesta generada: '{response_text[:100]}...'")
         
