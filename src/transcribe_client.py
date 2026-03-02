@@ -1,8 +1,14 @@
 """
 AWS Transcribe Streaming Client
 
-Este módulo implementa la integración con AWS Transcribe para transcripción
-de voz a texto en tiempo real mediante streaming.
+ESTADO: No se usa actualmente — el sistema usa Vosk (transcribe_client_vosk.py).
+
+FUTURA IMPLEMENTACIÓN:
+  - Para activar AWS Transcribe como alternativa en la nube, cambiar
+    en config.json: "transcribe_provider": "aws"
+  - Requiere: pip install amazon-transcribe
+  - Requiere: suscripción activa a AWS Transcribe en la cuenta AWS.
+  - Ver MIGRACION_AWS.md para instrucciones detalladas.
 
 Características:
 - Conexión de streaming persistente con AWS Transcribe

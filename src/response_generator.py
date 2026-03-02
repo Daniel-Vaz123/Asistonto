@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Optional, Dict
 import json
 
+import numpy as np
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -59,7 +60,8 @@ class ResponseGenerator:
         sample_rate: str = "22050",
         cache_enabled: bool = True,
         cache_dir: str = "cache",
-        region: str = "us-east-1"
+        region: str = "us-east-1",
+        volume_gain: float = 3.0
     ):
         """
         Inicializa el generador de respuestas.
@@ -80,6 +82,7 @@ class ResponseGenerator:
         self.cache_enabled = cache_enabled
         self.cache_dir = Path(cache_dir)
         self.region = region
+        self.volume_gain = volume_gain
         
         # Crear directorio de cache si no existe
         if self.cache_enabled:
@@ -274,6 +277,9 @@ class ResponseGenerator:
                 if not audio_data:
                     return False
             
+            if self.volume_gain != 1.0:
+                audio_data = self._amplify_pcm(audio_data, self.volume_gain)
+
             self.audio_manager.play_audio(audio_data, block=block)
             logger.info("Audio reproducido correctamente")
             return True
@@ -282,6 +288,14 @@ class ResponseGenerator:
             logger.error(f"Error reproduciendo audio: {e}")
             return False
     
+    @staticmethod
+    def _amplify_pcm(pcm_data: bytes, gain: float) -> bytes:
+        """Amplifica audio PCM 16-bit multiplicando las muestras por el factor de ganancia."""
+        samples = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
+        samples *= gain
+        samples = np.clip(samples, -32768, 32767)
+        return samples.astype(np.int16).tobytes()
+
     def _convert_mp3_to_pcm(self, mp3_data: bytes) -> Optional[bytes]:
         """
         Convierte audio MP3 a PCM para reproducción con PyAudio.
