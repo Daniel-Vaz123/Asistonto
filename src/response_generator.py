@@ -24,13 +24,17 @@ import os
 import hashlib
 import time
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, TYPE_CHECKING
 import json
 
+import numpy as np
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
 from src.audio_manager import AudioManager
+
+if TYPE_CHECKING:
+    from src.feedback_preventer import FeedbackPreventer
 
 
 logger = logging.getLogger(__name__)
@@ -60,7 +64,8 @@ class ResponseGenerator:
         cache_enabled: bool = True,
         cache_dir: str = "cache",
         region: str = "us-east-1",
-        feedback_preventer: Optional['FeedbackPreventer'] = None  # Phase 3: Auto-Mute
+        feedback_preventer: Optional['FeedbackPreventer'] = None,  # Phase 3: Auto-Mute
+        volume_gain: float = 3.0,
     ):
         """
         Inicializa el generador de respuestas.
@@ -83,6 +88,7 @@ class ResponseGenerator:
         self.cache_dir = Path(cache_dir)
         self.region = region
         self.feedback_preventer = feedback_preventer  # Phase 3: Auto-Mute
+        self.volume_gain = volume_gain
         
         # Crear directorio de cache si no existe
         if self.cache_enabled:
@@ -99,7 +105,8 @@ class ResponseGenerator:
         logger.info(
             f"ResponseGenerator inicializado: voz={polly_voice_id}, "
             f"formato={output_format}, cache={'habilitado' if cache_enabled else 'deshabilitado'}, "
-            f"auto_mute={'enabled' if feedback_preventer else 'disabled'}"
+            f"auto_mute={'enabled' if feedback_preventer else 'disabled'}, "
+            f"volume_gain={volume_gain}"
         )
     
     def _get_polly_client(self):
@@ -285,7 +292,11 @@ class ResponseGenerator:
                 audio_data = self._convert_mp3_to_pcm(audio_data)
                 if not audio_data:
                     return False
-            
+
+            # Aplicar ganancia de volumen si corresponde
+            if self.volume_gain != 1.0:
+                audio_data = self._amplify_pcm(audio_data, self.volume_gain)
+
             # Phase 3: Activar auto-mute ANTES de reproducir
             if self.feedback_preventer:
                 self.feedback_preventer.set_speaking()
@@ -330,6 +341,14 @@ class ResponseGenerator:
                 self.feedback_preventer.clear_speaking()
             return False
     
+    @staticmethod
+    def _amplify_pcm(pcm_data: bytes, gain: float) -> bytes:
+        """Amplifica audio PCM 16-bit multiplicando las muestras por el factor de ganancia."""
+        samples = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32)
+        samples *= gain
+        samples = np.clip(samples, -32768, 32767)
+        return samples.astype(np.int16).tobytes()
+
     def _convert_mp3_to_pcm(self, mp3_data: bytes) -> Optional[bytes]:
         """
         Convierte audio MP3 a PCM para reproducción con PyAudio.
