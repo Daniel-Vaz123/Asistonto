@@ -61,7 +61,8 @@ class CommandTranscriber:
         audio_manager: AudioManager,
         transcribe_client: TranscribeStreamingClientWrapper,
         silence_threshold: float = 1.5,
-        max_command_duration: float = 10.0
+        max_command_duration: float = 10.0,
+        feedback_preventer: Optional['FeedbackPreventer'] = None  # Phase 3: Auto-Mute
     ):
         """
         Inicializa el transcriptor de comandos.
@@ -71,11 +72,13 @@ class CommandTranscriber:
             transcribe_client: Cliente de AWS Transcribe
             silence_threshold: Segundos de silencio para finalizar
             max_command_duration: Duración máxima de comando
+            feedback_preventer: FeedbackPreventer para auto-mute (Phase 3)
         """
         self.audio_manager = audio_manager
         self.transcribe_client = transcribe_client
         self.silence_threshold = silence_threshold
         self.max_command_duration = max_command_duration
+        self.feedback_preventer = feedback_preventer  # Phase 3: Auto-Mute
         
         # Estado interno
         self._is_capturing = False
@@ -94,7 +97,8 @@ class CommandTranscriber:
         logger.info(
             f"CommandTranscriber inicializado: "
             f"silence_threshold={silence_threshold}s, "
-            f"max_duration={max_command_duration}s"
+            f"max_duration={max_command_duration}s, "
+            f"auto_mute={'enabled' if feedback_preventer else 'disabled'}"
         )
     
     def set_callbacks(
@@ -200,8 +204,13 @@ class CommandTranscriber:
         """
         Crea un generador asíncrono de chunks de audio.
         
+        Phase 3: Integra verificación de FeedbackPreventer para ignorar
+        audio mientras Kiro está hablando (auto-mute).
+        
         Yields:
-            Chunks de audio en formato PCM
+            Chunks de audio en formato PCM (solo cuando no está hablando)
+            
+        Requisito: 1.2 - Ignorar audio mientras Speaking_State es verdadero (Phase 3)
         """
         try:
             while self._is_capturing:
@@ -221,6 +230,12 @@ class CommandTranscriber:
                         f"finalizando captura"
                     )
                     break
+                
+                # Phase 3: Verificar si Kiro está hablando
+                if self.feedback_preventer and self.feedback_preventer.is_speaking():
+                    # Ignorar audio mientras está hablando
+                    await asyncio.sleep(0.01)
+                    continue
                 
                 # Obtener chunk de audio del AudioManager
                 audio_chunk = self.audio_manager.get_audio_chunk(timeout=0.1)
