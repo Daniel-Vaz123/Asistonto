@@ -69,7 +69,7 @@ class SystemState(Enum):
     El sistema siempre está en exactamente uno de estos estados.
     """
     ESCUCHANDO = "Escuchando"      # Esperando wake word
-    PROCESANDO = "Procesando"      # Procesando comando o llamando DeepSeek
+    PROCESANDO = "Pensando"        # Procesando comando o llamando DeepSeek (texto en UI)
     BUSCANDO = "Buscando en Web"   # Ejecutando búsqueda en internet
     HABLANDO = "Hablando"          # Sintetizando y reproduciendo respuesta
 

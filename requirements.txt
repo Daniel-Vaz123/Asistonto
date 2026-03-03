@@ -27,3 +27,8 @@ hypothesis>=6.0.0            # Property-based testing
 
 # Fase 3: System Actions, Memory, Feedback Prevention
 pywhatkit>=5.4               # YouTube playback y acciones del sistema
+
+# Base de datos vectorial (cache de respuestas + RAG, ahorro de créditos DeepSeek)
+chromadb>=0.4.0              # Almacenamiento vectorial persistente (local)
+sentence-transformers>=2.2.0  # Embeddings locales multilingües (español)
+supabase>=2.0.0               # Opcional: cache vectorial en Supabase (pgvector)

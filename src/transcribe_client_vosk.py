@@ -16,12 +16,15 @@ from src.transcribe_client import TranscriptionResult
 logger = logging.getLogger(__name__)
 
 try:
-    from vosk import Model, KaldiRecognizer
+    from vosk import Model, KaldiRecognizer, SetLogLevel
+    # Silenciar mensajes LOG de Kaldi (Decoding params, Loading i-vector, etc.)
+    SetLogLevel(-1)
     VOSK_AVAILABLE = True
 except ImportError:
     VOSK_AVAILABLE = False
     Model = None
     KaldiRecognizer = None
+    SetLogLevel = None
 
 
 class VoskTranscribeStreamingWrapper:

@@ -311,19 +311,12 @@ class ResponseGenerator:
                 # PyAudio escribe al buffer del sistema operativo, que sigue reproduciendo
                 # después de que write() retorna. Necesitamos calcular la duración real del audio.
                 if block:
-                    # Calcular duración real del audio basado en el tamaño de datos
-                    # audio_data es PCM int16 (2 bytes por sample)
-                    num_samples = len(audio_data) // 2  # 2 bytes por sample (int16)
+                    # Calcular duración del audio (PCM int16) y esperar a que termine de sonar
+                    # para no capturar eco y mostrar "Di Asistente" lo antes posible
+                    num_samples = len(audio_data) // 2
                     duration_seconds = num_samples / self.audio_manager.sample_rate
-                    
-                    # Agregar buffer adicional para latencia del sistema (200ms)
-                    total_wait = duration_seconds + 0.2
-                    
-                    logger.debug(
-                        f"Esperando {duration_seconds:.3f}s (audio) + 0.2s (buffer) = {total_wait:.3f}s "
-                        f"para que termine reproducción física"
-                    )
-                    await asyncio.sleep(total_wait)
+                    # Sin margen extra: el panel vuelve en cuanto termina la duración del audio
+                    await asyncio.sleep(max(0.05, duration_seconds))
                 
                 logger.info("Audio reproducido correctamente")
                 return True

@@ -174,7 +174,9 @@ class CommandProcessor:
         web_search_enabled: bool = True,
         data_dir: str = "data",
         smart_router_enabled: bool = True,
-        local_rag_enabled: bool = True
+        local_rag_enabled: bool = True,
+        vector_cache_enabled: bool = True,
+        vector_cache_backend: str = "chroma",
     ):
         """
         Inicializa el procesador de comandos.
@@ -186,9 +188,15 @@ class CommandProcessor:
             data_dir: Directorio para guardar notas (Phase 3)
             smart_router_enabled: Si True, usa SmartLLMRouter en lugar de IntentClassifier
             local_rag_enabled: Si True, habilita búsqueda de notas locales
+            vector_cache_enabled: Si True, usa base vectorial para cache de respuestas (ahorro DeepSeek)
+            vector_cache_backend: "chroma" (local) o "supabase" (nube). Supabase requiere SUPABASE_URL y SUPABASE_SERVICE_KEY en .env
         """
         self.response_generator = response_generator
         self.user_name = user_name
+        self.data_dir = data_dir
+        self._vector_cache_enabled = vector_cache_enabled
+        self._vector_cache_backend = (vector_cache_backend or "chroma").lower()
+        self._vector_store = None  # Inicialización perezosa (carga modelo de embeddings)
         
         # Compilar patrones regex para eficiencia
         self._compiled_patterns = {}
@@ -266,7 +274,8 @@ class CommandProcessor:
             f"CommandProcessor inicializado: {len(self.INTENTS)} intenciones, "
             f"usuario={user_name}, web_search={'enabled' if web_search_enabled else 'disabled'}, "
             f"actions={'enabled'}, smart_router={'enabled' if self.smart_router else 'disabled'}, "
-            f"local_rag={'enabled' if self.local_knowledge else 'disabled'}"
+            f"local_rag={'enabled' if self.local_knowledge else 'disabled'}, "
+            f"vector_cache={'enabled' if vector_cache_enabled else 'disabled'} (backend={self._vector_cache_backend})"
         )
     
     def _match_intent(self, text: str) -> Optional[str]:
@@ -615,9 +624,9 @@ class CommandProcessor:
 
         logger.info(f"Procesando comando: '{command_text}'")
 
-        # 2. Actualizar estado a PROCESANDO
-        self._update_state(SystemState.PROCESANDO)
+        # 2. Primero mensaje del usuario, después Pensando
         self.ui_manager.show_user_message(command_text)
+        self._update_state(SystemState.PROCESANDO)
 
         # 3. Clasificar intent (Phase 4: Smart LLM Router o Phase 3: IntentClassifier)
         if self.smart_router:
@@ -701,8 +710,7 @@ class CommandProcessor:
         spoken = False
         if speak:
             try:
-                self._update_state(SystemState.HABLANDO)
-                self.ui_manager.show_speaking_indicator()
+                # No mostrar panel "Hablando" para no repetir después de Asistente
 
                 # Usar response_generator.speak() que incluye auto-mute
                 spoken = await self.response_generator.speak(response_text, block=True)
@@ -710,8 +718,8 @@ class CommandProcessor:
             except Exception as e:
                 logger.error(f"Error hablando respuesta: {e}")
 
-        # 7. Volver a escuchar
-        self._update_state(SystemState.ESCUCHANDO)
+        # 7. Volver a escuchar (solo actualizar estado; el panel "Escuchando" lo muestra main)
+        self.ui_manager.update_state_silent(SystemState.ESCUCHANDO)
 
         return {
             'success': True,
@@ -853,10 +861,7 @@ class CommandProcessor:
         # Preparar prompt para DeepSeek con contexto de notas
         system_prompt = self._build_system_prompt(notes_context=notes_context)
         
-        # Llamar a DeepSeek en thread
-        self._update_state(SystemState.PROCESANDO)
-        self.ui_manager.show_thinking_indicator()
-        
+        # Llamar a DeepSeek en thread (Pensando ya se mostró una vez al inicio del comando)
         future = self.threading_manager.execute_async(
             self._call_deepseek,
             command_text,
@@ -872,6 +877,27 @@ class CommandProcessor:
         
         return response_text, False  # used_web_search = False
     
+    def _get_vector_store(self):
+        """Inicialización perezosa del cache vectorial (evita cargar modelo al arranque)."""
+        if self._vector_store is not None:
+            return self._vector_store
+        if not self._vector_cache_enabled:
+            return None
+        try:
+            from src.vector_store import VectorStore
+            self._vector_store = VectorStore(
+                persist_dir=os.path.join(self.data_dir, "chroma_db"),
+                min_similarity=0.88,
+                max_cache_entries=2000,
+                backend=self._vector_cache_backend,
+            )
+            logger.info("Cache vectorial inicializado: backend=%s (ahorro de créditos DeepSeek)", self._vector_cache_backend)
+            return self._vector_store
+        except Exception as e:
+            logger.warning("Cache vectorial no disponible: %s", e)
+            self._vector_cache_enabled = False
+            return None
+
     async def _process_conversational(self, command_text: str) -> tuple[str, bool]:
         """
         Procesa un comando conversacional con web search + DeepSeek.
@@ -884,6 +910,13 @@ class CommandProcessor:
             
         Requisito: 2.5 - Preservar flujo conversacional de Fase 2
         """
+        # Consultar cache vectorial antes de llamar a DeepSeek (ahorro de créditos)
+        store = self._get_vector_store()
+        if store:
+            cached = store.get_cached_response(command_text)
+            if cached is not None:
+                return cached, False
+
         # Verificar necesidad de web search
         needs_search = self.query_router.requires_web_search(command_text)
         web_context = ""
@@ -913,10 +946,7 @@ class CommandProcessor:
         # Preparar prompt para DeepSeek
         system_prompt = self._build_system_prompt(web_context)
         
-        # Llamar a DeepSeek en thread
-        self._update_state(SystemState.PROCESANDO)
-        self.ui_manager.show_thinking_indicator()
-        
+        # Llamar a DeepSeek en thread (Pensando ya se mostró una vez al inicio del comando)
         future = self.threading_manager.execute_async(
             self._call_deepseek,
             command_text,
@@ -929,7 +959,13 @@ class CommandProcessor:
         except Exception as e:
             logger.error(f"DeepSeek falló: {e}")
             response_text = "Lo siento, no pude procesar tu solicitud."
-        
+
+        # Guardar en cache vectorial para futuras preguntas similares
+        if response_text and store:
+            if getattr(store, "backend", None) == "supabase":
+                logger.info("Guardando respuesta en Supabase (cache vectorial)...")
+            store.add_to_cache(command_text, response_text)
+
         return response_text, bool(web_context)
     async def _process_conversational_with_notes(self, command_text: str, query: str) -> tuple[str, bool]:
         """
@@ -977,10 +1013,7 @@ class CommandProcessor:
         # Preparar prompt para DeepSeek con contexto de notas
         system_prompt = self._build_system_prompt(notes_context=notes_context)
 
-        # Llamar a DeepSeek en thread
-        self._update_state(SystemState.PROCESANDO)
-        self.ui_manager.show_thinking_indicator()
-
+        # Llamar a DeepSeek en thread (Pensando ya se mostró una vez al inicio del comando)
         future = self.threading_manager.execute_async(
             self._call_deepseek,
             command_text,
@@ -995,8 +1028,6 @@ class CommandProcessor:
             response_text = "Lo siento, no pude procesar tu solicitud."
 
         return response_text, False  # used_web_search = False
-
-
 
 
 # TODO: Integrar con Amazon Lex para NLU más avanzado

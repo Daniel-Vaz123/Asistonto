@@ -6,6 +6,7 @@ permitiendo responder preguntas sobre información en tiempo real.
 """
 
 import logging
+import warnings
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -29,9 +30,11 @@ class WebSearchModule:
         self.timeout = timeout
         self.logger = logging.getLogger(__name__)
         
-        # Verificar que duckduckgo-search está instalado
+        # Verificar que duckduckgo-search está instalado (silenciar aviso de renombre a ddgs)
         try:
-            from duckduckgo_search import DDGS
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                from duckduckgo_search import DDGS
             self.ddgs = DDGS()
         except ImportError:
             raise ImportError(
