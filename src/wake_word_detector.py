@@ -64,7 +64,8 @@ class WakeWordDetector:
         audio_manager: AudioManager,
         transcribe_client: TranscribeStreamingClientWrapper,
         confidence_threshold: float = 0.7,
-        detection_window: float = 3.0
+        detection_window: float = 3.0,
+        feedback_preventer: Optional['FeedbackPreventer'] = None  # Phase 3: Auto-Mute
     ):
         """
         Inicializa el detector de wake words.
@@ -75,6 +76,7 @@ class WakeWordDetector:
             transcribe_client: Cliente de AWS Transcribe
             confidence_threshold: Umbral mínimo de confianza para detección
             detection_window: Ventana de tiempo para validar detección (segundos)
+            feedback_preventer: FeedbackPreventer para auto-mute (Phase 3)
         """
         # Normalizar wake words a minúsculas para comparación case-insensitive
         self.wake_words = [word.lower() for word in wake_words]
@@ -82,6 +84,7 @@ class WakeWordDetector:
         self.transcribe_client = transcribe_client
         self.confidence_threshold = confidence_threshold
         self.detection_window = detection_window
+        self.feedback_preventer = feedback_preventer  # Phase 3: Auto-Mute
         
         # Estado interno
         self._is_detecting = False
@@ -95,7 +98,7 @@ class WakeWordDetector:
         
         logger.info(
             f"WakeWordDetector inicializado: wake_words={wake_words}, "
-            f"threshold={confidence_threshold}"
+            f"threshold={confidence_threshold}, auto_mute={'enabled' if feedback_preventer else 'disabled'}"
         )
     
     def pause(self) -> None:
@@ -138,6 +141,10 @@ class WakeWordDetector:
                 try:
                     self._paused = False
                     self._pending_command_task = None
+
+                    # Descartar audio acumulado mientras se procesaba el comando anterior
+                    self.audio_manager.clear_buffer()
+
                     # Crear generador de audio asíncrono
                     audio_stream = self._create_audio_stream()
                     
@@ -157,14 +164,15 @@ class WakeWordDetector:
                         except Exception as e:
                             logger.error(f"Error en captura de comando: {e}")
                         self._pending_command_task = None
+                        # El wake word anterior ya fue procesado; permitir detección inmediata
+                        self._last_detection_time = None
                     
                 except Exception as e:
                     logger.error(f"Error en stream de detección: {e}")
                     
                     if self._is_detecting:
-                        # Reintentar después de un breve delay
-                        logger.info("Reintentando conexión en 2 segundos...")
-                        await asyncio.sleep(2)
+                        logger.info("Reintentando conexión en 1 segundo...")
+                        await asyncio.sleep(1)
                     else:
                         break
         
@@ -188,11 +196,22 @@ class WakeWordDetector:
         """
         Crea un generador asíncrono de chunks de audio.
         
+        Phase 3: Integra verificación de FeedbackPreventer para ignorar
+        audio mientras Kiro está hablando (auto-mute).
+        
         Yields:
-            Chunks de audio en formato PCM
+            Chunks de audio en formato PCM (solo cuando no está hablando)
+            
+        Requisito: 1.2 - Ignorar audio mientras Speaking_State es verdadero (Phase 3)
         """
         try:
             while self._is_detecting and not self._paused:
+                # Phase 3: Verificar si Kiro está hablando
+                if self.feedback_preventer and self.feedback_preventer.is_speaking():
+                    # Ignorar audio mientras está hablando
+                    await asyncio.sleep(0.01)
+                    continue
+                
                 # Obtener chunk de audio del AudioManager
                 audio_chunk = self.audio_manager.get_audio_chunk(timeout=0.1)
                 

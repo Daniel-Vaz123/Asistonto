@@ -227,11 +227,15 @@ class TranscribeStreamingClientWrapper:
             on_error: Callback para errores
             
         Raises:
-            RuntimeError: Si ya hay un stream activo
             BotoCoreError: Si hay error de conexión con AWS
         """
         if self._is_streaming:
-            raise RuntimeError("Ya hay un stream de transcripción activo")
+            # En lugar de fallar, detenemos el stream anterior y abrimos uno nuevo.
+            logger.warning(
+                "Se intentó iniciar un nuevo stream de transcripción mientras otro seguía activo; "
+                "deteniendo el stream anterior."
+            )
+            await self.stop_stream()
         
         try:
             # Crear cliente de Transcribe
@@ -269,7 +273,6 @@ class TranscribeStreamingClientWrapper:
             
             self._is_streaming = True
             
-            # Iniciar tareas asíncronas para enviar audio y recibir transcripciones
             send_task = asyncio.create_task(
                 self._send_audio_stream(stream, audio_stream)
             )
@@ -277,8 +280,22 @@ class TranscribeStreamingClientWrapper:
                 self._stream_handler.handle_events()
             )
             
-            # Esperar a que ambas tareas terminen
-            await asyncio.gather(send_task, receive_task)
+            # Esperar a que terminen; timeout evita que se cuelgue si AWS no cierra el stream
+            done, pending = await asyncio.wait(
+                [send_task, receive_task],
+                timeout=None,
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
+            # Si send terminó (audio_stream agotado), dar un momento al receive para procesar últimos eventos
+            if send_task in done and receive_task in pending:
+                try:
+                    await asyncio.wait_for(receive_task, timeout=3.0)
+                except asyncio.TimeoutError:
+                    receive_task.cancel()
+                    logger.debug("Receive task cancelado tras timeout post-send")
+            for t in pending:
+                if not t.done():
+                    t.cancel()
             
         except (BotoCoreError, ClientError) as e:
             logger.error(f"Error de AWS al iniciar stream: {e}")
@@ -316,15 +333,15 @@ class TranscribeStreamingClientWrapper:
             async for audio_chunk in audio_stream:
                 if not self._is_streaming:
                     break
-                
-                # Enviar chunk de audio al stream
                 await stream.input_stream.send_audio_event(audio_chunk=audio_chunk)
-                
-                # Pequeña pausa para no saturar el stream
                 await asyncio.sleep(0.01)
             
-            # Finalizar el stream de entrada
-            await stream.input_stream.end_stream()
+            try:
+                await asyncio.wait_for(
+                    stream.input_stream.end_stream(), timeout=2.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("end_stream() tardó más de 2 s; continuando sin esperar")
             logger.debug("Stream de audio finalizado")
             
         except Exception as e:

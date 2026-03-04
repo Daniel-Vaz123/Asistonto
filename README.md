@@ -9,37 +9,49 @@ Kiro escucha continuamente el micrófono, detecta la palabra de activación **"A
 ## ¿Qué hace?
 
 1. **Escucha continua**: captura audio del micrófono en tiempo real usando PyAudio.
-2. **Transcripción local**: convierte la voz a texto de forma offline usando Vosk (no requiere internet para esta parte).
+2. **Transcripción en la nube**: convierte la voz a texto con **AWS Transcribe** (streaming en tiempo real).
 3. **Detección de wake word**: identifica cuando el usuario dice "Asistente" (con tolerancia a errores de pronunciación mediante coincidencia difusa).
-4. **Procesamiento de comandos**: analiza la intención del usuario (hora, fecha, chistes, saludos, etc.) usando regex y coincidencia difusa.
-5. **Respuestas inteligentes con IA**: para preguntas generales que no coinciden con un comando predefinido, consulta la API de **DeepSeek** (modelo `deepseek-chat`) a través de la biblioteca `openai`.
-6. **Síntesis de voz**: convierte la respuesta de texto a audio usando **Amazon Polly** y la reproduce por el altavoz.
-7. **Vuelve a escuchar**: tras responder, regresa automáticamente al modo de espera.
+4. **Clasificación inteligente de comandos**: usa **Smart LLM Router** con DeepSeek para clasificar intenciones (conversacional, notas, YouTube, apps, web).
+5. **Notas en Supabase**: las notas del usuario se guardan y buscan solo en la base de datos (tabla `user_notes`), no en archivos locales.
+6. **Cache vectorial en Supabase**: almacena preguntas/respuestas con pgvector para reducir llamadas a DeepSeek (umbral de similitud 0.97).
+7. **Respuestas inteligentes con IA**: para preguntas generales, consulta **DeepSeek** con contexto de notas o búsqueda web.
+8. **Síntesis de voz**: convierte la respuesta a audio con **Amazon Polly** y la reproduce por el altavoz (sin bloquear el event loop).
+9. **Vuelve a escuchar**: tras responder, limpia el buffer de audio y regresa al modo de espera en ~1–2 segundos.
 
 ---
 
 ## Arquitectura y Flujo
 
 ```
-┌─────────────┐    ┌────────────┐    ┌──────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│  Micrófono  │───▸│  PyAudio   │───▸│   Vosk (STT)     │───▸│ CommandProcessor │───▸│  Amazon Polly   │
-│  (entrada)  │    │  captura   │    │  transcripción   │    │ regex + DeepSeek │    │  (TTS salida)   │
-└─────────────┘    │  continua  │    │  local offline   │    │  genera respuesta│    │  voz hablada    │
-                   └────────────┘    └──────────────────┘    └──────────────────┘    └─────────────────┘
+┌─────────────┐    ┌────────────┐    ┌──────────────────────┐    ┌──────────────────────┐    ┌─────────────────┐
+│  Micrófono  │───▸│  PyAudio   │───▸│  AWS Transcribe      │───▸│  SmartLLMRouter      │───▸│  Amazon Polly   │
+│  (entrada)  │    │  captura   │    │  (streaming STT)     │    │  DeepSeek + JSON     │    │  (TTS salida)   │
+└─────────────┘    │  continua  │    │  español             │    │  clasificación       │    │  voz hablada    │
+                   └────────────┘    └──────────────────────┘    └──────────────────────┘    └─────────────────┘
+                                                                        │
+                                                                        ├─▸ LocalKnowledgeReader (RAG)
+                                                                        │   └─▸ Notas en Supabase (user_notes)
+                                                                        │
+                                                                        ├─▸ VectorStore (Supabase)
+                                                                        │   └─▸ Cache Q&A con embeddings
+                                                                        │
+                                                                        └─▸ ActionRouter
+                                                                            └─▸ YouTube, Apps, Web, Notas
 ```
 
 ### Flujo detallado
 
 1. `AudioManager` captura audio continuamente desde el micrófono en un hilo separado.
-2. `WakeWordDetector` alimenta el audio a `VoskTranscribeStreamingWrapper`, que transcribe en tiempo real.
-3. Cuando detecta la palabra **"Asistente"** (o variación), pasa a modo comando.
-4. `CommandTranscriber` captura el comando del usuario y lo transcribe con Vosk.
-5. `CommandProcessor` identifica la intención:
-   - Si coincide con un comando predefinido (hora, fecha, chiste, etc.), genera la respuesta directamente.
-   - Si no coincide, consulta a **DeepSeek** como fallback inteligente.
-6. `ResponseGenerator` envía la respuesta de texto a **Amazon Polly**, que la convierte a audio.
-7. `AudioManager` reproduce el audio por el altavoz.
-8. El sistema vuelve a escuchar.
+2. `WakeWordDetector` envía el audio a **AWS Transcribe** (streaming) y detecta la palabra **"Asistente"** (o variación).
+3. Al detectarla, pasa a modo comando: `CommandTranscriber` captura el comando hasta **2 segundos de silencio** o hasta **60 segundos** de habla continua.
+4. `SmartLLMRouter` clasifica el comando con DeepSeek (timeout 3 s, fallback conversacional).
+5. `CommandProcessor` procesa según el intent:
+   - **Conversational**: Cache vectorial (Supabase) → si no hay hit (similitud ≥ 0.97), consulta DeepSeek → guarda en cache.
+   - **File (crear nota)**: Guarda en Supabase (`user_notes`), no en archivos locales.
+   - **File (leer nota)**: Busca en Supabase con LocalKnowledgeReader → inyecta contexto en DeepSeek.
+   - **YouTube/App/Web**: ActionRouter ejecuta la acción.
+6. `ResponseGenerator` sintetiza con **Amazon Polly** y reproduce en un executor (no bloquea el event loop).
+7. Auto-Mute evita que el micrófono transcriba la voz del asistente; al terminar se limpia el buffer de audio y se vuelve a escuchar.
 
 ---
 
@@ -49,24 +61,27 @@ Kiro escucha continuamente el micrófono, detecta la palabra de activación **"A
 
 | Biblioteca | Versión mínima | Función en el proyecto |
 |---|---|---|
-| **vosk** | `>=0.3.45` | **Transcripción de voz a texto (STT)**. Motor de reconocimiento de voz offline. Usa un modelo de idioma español descargado localmente para convertir el audio del micrófono a texto sin necesidad de internet. |
-| **openai** | `>=1.0.0` | **Cliente para la API de DeepSeek**. Se usa la biblioteca `openai` (compatible con la API de OpenAI) apuntando al endpoint de DeepSeek (`https://api.deepseek.com`) con el modelo `deepseek-chat`. Responde preguntas generales cuando el comando no coincide con una intención predefinida. |
-| **boto3** / **botocore** | `>=1.28.0` / `>=1.31.0` | **Síntesis de voz (TTS) con Amazon Polly**. Convierte las respuestas de texto del asistente a audio hablado usando la voz neural "Mia" en español. También se usa para posible integración futura con AWS Transcribe. |
-| **pyaudio** | `>=0.2.13` | **Captura y reproducción de audio**. Maneja el micrófono (entrada) y el altavoz (salida) en tiempo real. Usa un buffer circular para captura continua. |
-| **numpy** | `>=1.24.0` | **Procesamiento de señales de audio**. Se usa para calcular niveles de ruido (RMS), calibrar el micrófono y verificar que el nivel de audio sea adecuado. |
-| **python-dotenv** | `>=1.0.0` | **Gestión de variables de entorno**. Carga las credenciales de AWS y la API key de DeepSeek desde el archivo `.env`. |
-| **aiohttp** | `>=3.8.0` | **Soporte HTTP asíncrono**. Dependencia para operaciones asíncronas de red. |
+| **boto3** / **botocore** | `>=1.28.0` / `>=1.31.0` | **Amazon Polly (TTS)** y **AWS Transcribe (STT)**. Síntesis de voz y transcripción de voz a texto en tiempo real. |
+| **amazon-transcribe** | (ver requirements.txt) | Cliente de streaming para AWS Transcribe. |
+| **openai** | `>=1.0.0` | Cliente para la API de **DeepSeek** (clasificación de intenciones y respuestas inteligentes). |
+| **pyaudio** | `>=0.2.13` | Captura y reproducción de audio (micrófono y altavoz). |
+| **numpy** | `>=1.24.0` | Procesamiento de señales de audio (RMS, calibración). |
+| **python-dotenv** | `>=1.0.0` | Variables de entorno (AWS, DeepSeek, Supabase). |
+| **sentence-transformers** | `>=2.2.0` | Embeddings para cache vectorial (modelo `all-MiniLM-L6-v2`). |
+| **supabase** | `>=2.0.0` | Cache Q&A (pgvector) y notas de usuario (tabla `user_notes`). |
+| **chromadb** | `>=0.4.0` | Opcional: cache vectorial local (por defecto se usa Supabase). |
 
 ### Resumen por función
 
 | Función | Tecnología |
 |---|---|
-| Reconocimiento de voz (STT) | **Vosk** — offline, modelo en español `vosk-model-small-es-0.42` |
-| Respuestas inteligentes (IA) | **DeepSeek** — vía biblioteca `openai` apuntando a `api.deepseek.com` |
-| Síntesis de voz (TTS) | **Amazon Polly** — voz neural "Mia", idioma español (vía `boto3`) |
-| Captura de audio | **PyAudio** — micrófono en tiempo real, buffer circular |
-| Procesamiento de comandos | **Python** — regex, `SequenceMatcher` para coincidencia difusa |
-| Programación asíncrona | **asyncio** — orquestación de componentes en tiempo real |
+| Reconocimiento de voz (STT) | **AWS Transcribe** — streaming, español (es-ES) |
+| Clasificación de intenciones | **SmartLLMRouter** — DeepSeek, JSON estructurado |
+| Notas del usuario | **Supabase** — tabla `user_notes` (lectura/escritura) |
+| Cache vectorial Q&A | **VectorStore** — Supabase (pgvector), similitud ≥ 0.97 |
+| Respuestas inteligentes | **DeepSeek** — vía `openai` apuntando a `api.deepseek.com` |
+| Síntesis de voz (TTS) | **Amazon Polly** — voz "Mia", español |
+| Captura de audio | **PyAudio** — buffer circular, Auto-Mute durante reproducción |
 
 ---
 
@@ -74,81 +89,77 @@ Kiro escucha continuamente el micrófono, detecta la palabra de activación **"A
 
 ```
 Asistonto/
-├── src/                             # Código fuente principal
-│   ├── __init__.py                  # Paquete Python (versión 0.1.0)
-│   ├── main.py                      # Punto de entrada — orquesta todos los componentes
-│   ├── audio_manager.py             # Captura continua de audio (micrófono) y reproducción (altavoz)
-│   ├── transcribe_client_vosk.py    # Cliente de transcripción con Vosk (EN USO — local, offline)
-│   ├── transcribe_client.py         # Cliente de AWS Transcribe (FUTURA IMPLEMENTACIÓN)
-│   ├── wake_word_detector.py        # Detección de la palabra de activación ("Asistente")
-│   ├── command_transcriber.py       # Captura y transcripción de comandos de voz
-│   ├── command_processor.py         # Procesamiento de intenciones + fallback con DeepSeek
-│   ├── response_generator.py        # Síntesis de voz con Amazon Polly + cache de respuestas
-│   ├── models.py                    # Modelos de datos (CommandResult en uso; Reminder, Session, IoTDevice futuros)
-│   ├── session_manager.py           # Gestión de sesiones (FUTURA IMPLEMENTACIÓN)
-│   ├── iot_controller.py            # Control de dispositivos IoT (FUTURA IMPLEMENTACIÓN)
-│   ├── data_manager.py              # Gestión de datos con SQLite (FUTURA IMPLEMENTACIÓN)
-│   └── utils/
-│       ├── config_loader.py         # Cargador y validador de configuración
-│       └── db_schema.py             # Esquema SQLite (FUTURA IMPLEMENTACIÓN)
+├── src/
+│   ├── main.py                      # Punto de entrada, orquesta componentes
+│   ├── audio_manager.py             # Captura continua y reproducción con Auto-Mute
+│   ├── transcribe_client.py         # Cliente AWS Transcribe (streaming)
+│   ├── wake_word_detector.py        # Detección "Asistente"
+│   ├── command_transcriber.py       # Captura de comando (silencio 2s, máx 60s)
+│   ├── command_processor.py         # Smart Router, RAG, cache, acciones
+│   ├── smart_llm_router.py          # Clasificación con DeepSeek
+│   ├── local_knowledge_reader.py    # RAG sobre notas (Supabase o .md)
+│   ├── vector_store.py              # Cache Q&A (Supabase / ChromaDB)
+│   ├── notes_db.py                  # Guardado y búsqueda de notas en Supabase
+│   ├── intent_classifier.py         # Clasificador regex (fallback)
+│   ├── action_router.py             # YouTube, Apps, Web, Notas
+│   ├── response_generator.py        # Amazon Polly + reproducción en executor
+│   ├── query_router.py              # ¿Requiere búsqueda web?
+│   ├── web_search.py                # DuckDuckGo
+│   ├── feedback_preventer.py        # Auto-Mute durante TTS
+│   ├── rich_ui_manager.py           # Paneles de estado en consola
+│   └── actions/
+│       ├── file_writer_action.py    # Crear notas → Supabase (user_notes)
+│       ├── youtube_action.py        # Reproducir YouTube
+│       ├── app_launcher_action.py   # Abrir aplicaciones
+│       └── web_browser_action.py    # Abrir sitios web
 │
 ├── scripts/
-│   └── download_vosk_model.py       # Descarga automática del modelo Vosk en español
+│   ├── check_supabase_vector.py     # Verificar Supabase (cache + notas)
+│   └── test_supabase_insert.py      # Probar inserción en Supabase
 │
-├── model/                           # Modelo Vosk de idioma español (no se sube a git)
-│   └── vosk-model-small-es-0.42/    # Modelo descargado (~50 MB)
+├── data/                            # Opcional (solo .gitkeep si todo está en Supabase)
+├── logs/                            # Logs del sistema
+├── cache/                           # Cache de audio de Amazon Polly
+├── docs/
+│   └── SUPABASE_VECTOR_SETUP.md     # Configuración Supabase (qa_cache + user_notes)
 │
-├── logs/                            # Archivos de log del sistema
-├── cache/                           # Cache de respuestas de Amazon Polly
-├── documents/                       # Documentación del proyecto (casos de uso, acuerdos)
-│
-├── setup.bat                        # Script de instalación automática (Windows)
-├── setup.sh                         # Script de instalación automática (Linux/Mac/Git Bash)
-├── config.json                      # Configuración general del sistema
-├── .env                             # Credenciales AWS + API key DeepSeek (no se sube a git)
+├── config.json                      # Configuración (aws, wake_words, features)
+├── .env                             # Credenciales (no se sube a git)
 ├── .env.example                     # Plantilla de credenciales
-├── requirements.txt                 # Dependencias Python
-├── README.md                        # Documentación principal
-├── MIGRACION_AWS.md                 # Guía para migrar de Vosk a AWS Transcribe
-└── .gitignore                       # Archivos excluidos del repositorio
+├── requirements.txt
+├── README.md
+└── MIGRACION_AWS.md                 # Referencia: migración desde Vosk (ya no usado)
 ```
 
-### Descripción de cada módulo
+### Módulos principales
 
-| Módulo | Estado | Descripción |
-|---|---|---|
-| `main.py` | EN USO | Clase `VoiceAssistantMVP` que inicializa y conecta todos los componentes. Configura callbacks, maneja el flujo principal y la interfaz de consola. |
-| `audio_manager.py` | EN USO | Gestiona PyAudio: captura continua en un hilo separado con buffer circular, calibración del micrófono, reproducción de audio. |
-| `transcribe_client_vosk.py` | EN USO | Transcripción local con Vosk. Procesa audio en bloques de ~500ms y emite resultados parciales y finales. |
-| `wake_word_detector.py` | EN USO | Detecta la palabra "Asistente" usando coincidencia exacta y difusa. Soporta comandos inline ("Asistente qué hora es"). |
-| `command_transcriber.py` | EN USO | Captura un comando de voz completo. Detecta silencio para finalizar (timeout máx. 10s). |
-| `command_processor.py` | EN USO | Matriz de intenciones (regex) + fallback inteligente con DeepSeek para preguntas generales. |
-| `response_generator.py` | EN USO | Amazon Polly (voz "Mia") para TTS + cache local de respuestas repetidas. |
-| `models.py` | PARCIAL | `CommandResult` en uso. `Reminder`, `Session`, `IoTDevice` definidos para futura implementación. |
-| `transcribe_client.py` | FUTURO | AWS Transcribe como alternativa en la nube. Ver `MIGRACION_AWS.md`. |
-| `session_manager.py` | FUTURO | Gestión de sesiones de conversación con contexto persistente. |
-| `iot_controller.py` | FUTURO | Control de dispositivos IoT con AWS IoT Core. |
-| `data_manager.py` | FUTURO | Base de datos SQLite local + sincronización con DynamoDB. |
+| Módulo | Descripción |
+|---|---|
+| `transcribe_client.py` | AWS Transcribe streaming. Si ya hay un stream activo, se detiene y se abre uno nuevo (evita error "stream activo"). |
+| `command_transcriber.py` | Captura comando hasta 2 s de silencio o 60 s máx. |
+| `vector_store.py` | Cache Q&A en Supabase; similitud mínima 0.97 para reutilizar respuesta. |
+| `notes_db.py` | Guardar/buscar notas en tabla `user_notes` (Supabase). |
+| `response_generator.py` | Polly + reproducción en `run_in_executor` para no bloquear el event loop en respuestas largas. |
+| `wake_word_detector.py` | Tras cada comando, limpia buffer de audio y resetea ventana de detección para escuchar de nuevo. |
 
 ---
 
 ## Requisitos
 
-- **Python 3.12 o 3.13** (PyAudio tiene wheels precompilados para estas versiones).
-- **Micrófono** (el de la laptop, USB o headset).
-- **Conexión a Internet** (solo para Amazon Polly y DeepSeek; Vosk funciona offline).
-- **Cuenta AWS** con credenciales para Amazon Polly (tier gratuito).
-- **API Key de DeepSeek** para preguntas generales con IA.
+- **Python 3.12 o 3.13**
+- **Micrófono**
+- **Conexión a Internet** (AWS Transcribe, Polly, DeepSeek, Supabase)
+- **Cuenta AWS** (Polly + Transcribe)
+- **API Key de DeepSeek**
+- **Proyecto Supabase** (tablas `qa_cache` y `user_notes`). Ver `docs/SUPABASE_VECTOR_SETUP.md`.
 
 ---
 
 ## Instalación
 
-### Opción A: Script automático (recomendado)
+### Opción A: Script automático
 
-El script crea el entorno virtual, instala dependencias y descarga el modelo Vosk automáticamente.
-
-**Windows (doble clic o CMD):**
+**Windows:**
 ```
 setup.bat
 ```
@@ -164,24 +175,30 @@ chmod +x setup.sh
 ```bash
 cd Asistonto
 python -m venv .venv
-source .venv/Scripts/activate   # Git Bash en Windows
+source .venv/Scripts/activate   # Windows Git Bash
+# .venv\Scripts\activate        # Windows CMD
 pip install -r requirements.txt
-python scripts/download_vosk_model.py
 ```
 
-### Configurar credenciales en `.env`
-
-Después de la instalación, edita el archivo `.env` con tus credenciales reales:
+### Configurar `.env`
 
 ```env
+# AWS (Polly + Transcribe)
 AWS_ACCESS_KEY_ID=tu_access_key
 AWS_SECRET_ACCESS_KEY=tu_secret_key
 AWS_DEFAULT_REGION=us-east-1
-DEEPSEEK_API_KEY=tu_api_key_de_deepseek
+
+# DeepSeek
+DEEPSEEK_API_KEY=tu_api_key
+
+# Supabase (cache Q&A + notas)
+SUPABASE_URL=https://tu-proyecto.supabase.co
+SUPABASE_SERVICE_KEY=tu_service_role_key
 ```
 
-- Las credenciales de AWS se usan para **Amazon Polly** (síntesis de voz).
-- La API key de DeepSeek se usa para **respuestas inteligentes** a preguntas generales.
+- **AWS**: Polly (TTS) y Transcribe (STT).
+- **DeepSeek**: Smart Router y respuestas conversacionales.
+- **Supabase**: Cache vectorial y notas. Ver `docs/SUPABASE_VECTOR_SETUP.md`.
 
 ### Ejecutar
 
@@ -189,30 +206,31 @@ DEEPSEEK_API_KEY=tu_api_key_de_deepseek
 python -m src.main
 ```
 
+Para ocultar warnings en consola:
+
+```bash
+python -W ignore -m src.main
+```
+
 ---
 
 ## Uso
 
-- En gris aparece lo que el micrófono capta en tiempo real.
-- Di **"Asistente"** y el sistema se activa.
-- Di tu comando (ej. "¿qué hora es?").
-- Kiro responde por texto en la consola y por voz en el altavoz.
+- Di **"Asistente"** para activar.
+- Di tu comando o pregunta (puedes hablar hasta ~60 segundos; se cierra con 2 segundos de silencio).
+- Kiro responde por texto y por voz.
 - Vuelve a escuchar automáticamente.
 - `Ctrl+C` para salir.
 
-### Comandos predefinidos
+### Comandos de ejemplo
 
 | Intención | Ejemplos |
 |---|---|
-| Identidad | "¿Cómo te llamas?", "¿Quién eres?" |
-| Estado | "¿Cómo estás?", "¿Qué tal?" |
-| Hora | "¿Qué hora es?", "Dime la hora" |
-| Fecha | "¿Qué día es hoy?", "¿Qué fecha es?" |
-| Chiste | "Cuéntame un chiste", "Dime algo gracioso" |
-| Saludo | "Hola", "Buenos días" |
-| Despedida | "Adiós", "Gracias" |
-| Capacidades | "¿Qué puedes hacer?", "Ayuda" |
-| **Pregunta general** | Cualquier otra pregunta → se envía a DeepSeek |
+| Hora / Fecha | "¿Qué hora es?", "¿Qué día es hoy?" (solo preguntas sobre hoy) |
+| Crear nota | "Anota que mañana tengo clase", "Guarda que el proyecto va al 80%" |
+| Leer notas | "¿Qué notas tengo sobre el proyecto?", "Revisa mis apuntes" |
+| YouTube / App / Web | "Pon música en YouTube", "Abre Chrome" |
+| Pregunta general | Cualquier otra pregunta → DeepSeek (con cache y/o búsqueda web) |
 
 ---
 
@@ -220,14 +238,22 @@ python -m src.main
 
 | Campo | Descripción |
 |---|---|
-| `transcribe_provider` | `vosk` (local, offline) o `aws` (nube) |
-| `vosk.model_path` | Ruta al modelo de idioma descargado |
-| `vosk.buffer_ms` | Buffer de audio en milisegundos (300–500) |
-| `audio.chunk_size` | Frames por bloque de audio (4000 = 250 ms) |
-| `wake_words` | Lista de palabras de activación (ej. `["asistente"]`) |
-| `user_name` | Nombre del usuario para personalización de respuestas |
-| `aws.polly.voice_id` | Voz de Amazon Polly (`Mia`, `Lucia`, `Enrique`) |
-| `features.voice_cache_enabled` | Habilitar cache de audio para respuestas repetidas |
+| `aws.transcribe.language_code` | Idioma para AWS Transcribe (ej. `es-ES`) |
+| `aws.polly.voice_id` | Voz de Polly (`Mia`, `Lucia`, etc.) |
+| `wake_words` | Palabras de activación (ej. `["asistente"]`) |
+| `user_name` | Nombre del usuario en respuestas |
+| `features.vector_cache_backend` | `supabase` (por defecto) o `chroma` |
+| `features.notes_backend` | `supabase` (por defecto) — notas solo en BD |
+| `features.voice_cache_enabled` | Cache de audio de Polly |
+| `features.vector_cache_enabled` | Cache Q&A en Supabase |
+
+---
+
+## Cache vectorial y notas (Supabase)
+
+- **Cache Q&A**: Preguntas y respuestas se guardan en Supabase (pgvector). Solo se reutiliza una respuesta si la nueva pregunta tiene similitud **≥ 0.97** con una guardada (evita respuestas incorrectas por preguntas parecidas).
+- **Notas**: Se guardan en la tabla `user_notes` (crear nota por voz). La búsqueda para "leer notas" se hace contra esa tabla.
+- No se usa almacenamiento local obligatorio: ni ChromaDB ni archivos `data/*.md` son necesarios si `vector_cache_backend` y `notes_backend` son `supabase`.
 
 ---
 
