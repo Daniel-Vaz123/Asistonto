@@ -141,6 +141,10 @@ class WakeWordDetector:
                 try:
                     self._paused = False
                     self._pending_command_task = None
+
+                    # Descartar audio acumulado mientras se procesaba el comando anterior
+                    self.audio_manager.clear_buffer()
+
                     # Crear generador de audio asíncrono
                     audio_stream = self._create_audio_stream()
                     
@@ -160,14 +164,15 @@ class WakeWordDetector:
                         except Exception as e:
                             logger.error(f"Error en captura de comando: {e}")
                         self._pending_command_task = None
+                        # El wake word anterior ya fue procesado; permitir detección inmediata
+                        self._last_detection_time = None
                     
                 except Exception as e:
                     logger.error(f"Error en stream de detección: {e}")
                     
                     if self._is_detecting:
-                        # Reintentar después de un breve delay
-                        logger.info("Reintentando conexión en 2 segundos...")
-                        await asyncio.sleep(2)
+                        logger.info("Reintentando conexión en 1 segundo...")
+                        await asyncio.sleep(1)
                     else:
                         break
         

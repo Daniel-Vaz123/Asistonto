@@ -14,6 +14,9 @@ aiohttp>=3.8.0
 # Transcripción local (Vosk – reconocimiento de voz offline)
 vosk>=0.3.45
 
+# Transcripción en la nube (AWS Transcribe – opcional)
+amazon-transcribe>=0.6.0
+
 # IA / Preguntas generales (DeepSeek)
 openai>=1.0.0
 

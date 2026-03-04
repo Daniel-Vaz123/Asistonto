@@ -49,7 +49,7 @@ class RichUIManager:
         
         panel = Panel(
             banner_text,
-            box=box.DOUBLE,
+            box=box.SQUARE,
             border_style="cyan",
             padding=(1, 2)
         )
@@ -70,7 +70,7 @@ class RichUIManager:
         panel = Panel(
             content,
             border_style=color,
-            box=box.ROUNDED,
+            box=box.SQUARE,
             padding=(0, 2)
         )
         self.console.print(panel)

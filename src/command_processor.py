@@ -80,16 +80,19 @@ class CommandProcessor:
         },
         'hora': {
             'patterns': [
-                r'\b(qué hora|hora es|dime la hora|cuál es la hora)\b',
-                r'\b(hora tiene|hora tenemos)\b'
+                r'\b(qué hora es|hora es|dime la hora|cuál es la hora)\b',
+                r'\b(hora tiene|hora tenemos)\b',
+                r'^(qué hora|la hora)$',
             ],
             'dynamic': True,
             'handler': 'get_current_time'
         },
         'fecha': {
             'patterns': [
-                r'\b(qué día|fecha|día es hoy|estamos a)\b',
-                r'\b(qué fecha|cuál es la fecha)\b'
+                r'\b(qué día es hoy|qué fecha es hoy|día es hoy|estamos a)\b',
+                r'\b(cuál es la fecha|qué fecha es|fecha de hoy|en qué fecha estamos)\b',
+                r'\b(a qué estamos|qué día estamos)\b',
+                r'^(qué día es|qué fecha|fecha)$',
             ],
             'dynamic': True,
             'handler': 'get_current_date'
@@ -140,8 +143,8 @@ class CommandProcessor:
 
     # Frases clave para coincidencia difusa (toleran errores de transcripción tipo "ora"/"hora")
     FUZZY_PHRASES: Dict[str, List[str]] = {
-        'hora': ['qué hora es', 'dime la hora', 'que hora es', 'cuál es la hora', 'que ora es', 'ora es'],
-        'fecha': ['qué día es', 'qué fecha es', 'fecha', 'día es hoy', 'que dia es', 'que fecha'],
+        'hora': ['qué hora es', 'dime la hora', 'que hora es', 'cuál es la hora', 'que ora es'],
+        'fecha': ['qué día es hoy', 'qué fecha es hoy', 'día es hoy', 'que dia es hoy', 'en qué fecha estamos'],
         'chiste': ['chiste', 'cuéntame un chiste', 'dime un chiste', 'algo gracioso', 'un chiste'],
         'identidad': ['cómo te llamas', 'quién eres', 'tu nombre', 'preséntate', 'como te llamas'],
         'estado': ['cómo estás', 'qué tal', 'cómo te va', 'estás bien', 'como estas'],
@@ -176,7 +179,8 @@ class CommandProcessor:
         smart_router_enabled: bool = True,
         local_rag_enabled: bool = True,
         vector_cache_enabled: bool = True,
-        vector_cache_backend: str = "chroma",
+        vector_cache_backend: str = "supabase",
+        notes_backend: str = "supabase",
     ):
         """
         Inicializa el procesador de comandos.
@@ -187,15 +191,16 @@ class CommandProcessor:
             web_search_enabled: Si True, habilita búsqueda web
             data_dir: Directorio para guardar notas (Phase 3)
             smart_router_enabled: Si True, usa SmartLLMRouter en lugar de IntentClassifier
-            local_rag_enabled: Si True, habilita búsqueda de notas locales
+            local_rag_enabled: Si True, habilita búsqueda de notas
             vector_cache_enabled: Si True, usa base vectorial para cache de respuestas (ahorro DeepSeek)
-            vector_cache_backend: "chroma" (local) o "supabase" (nube). Supabase requiere SUPABASE_URL y SUPABASE_SERVICE_KEY en .env
+            vector_cache_backend: "chroma" (local) o "supabase" (nube)
+            notes_backend: "local" (notas en data/*.md) o "supabase" (notas solo en BD user_notes)
         """
         self.response_generator = response_generator
         self.user_name = user_name
         self.data_dir = data_dir
         self._vector_cache_enabled = vector_cache_enabled
-        self._vector_cache_backend = (vector_cache_backend or "chroma").lower()
+        self._vector_cache_backend = (vector_cache_backend or "supabase").lower()
         self._vector_store = None  # Inicialización perezosa (carga modelo de embeddings)
         
         # Compilar patrones regex para eficiencia
@@ -255,7 +260,8 @@ class CommandProcessor:
                 data_dir=data_dir,
                 max_context_tokens=2000,
                 max_results=3,
-                threading_manager=self.threading_manager
+                threading_manager=self.threading_manager,
+                notes_backend=notes_backend,
             )
             # Inicializar en thread separado para no bloquear
             try:
@@ -310,8 +316,12 @@ class CommandProcessor:
         """Devuelve (intent, ratio) con la mejor coincidencia por similitud. Tolera errores de transcripción."""
         best_intent: Optional[str] = None
         best_ratio: float = 0.0
+        text_words = len(text.split())
         for intent_name, phrases in self.FUZZY_PHRASES.items():
             for phrase in phrases:
+                phrase_words = len(phrase.split())
+                if text_words > phrase_words + 3:
+                    continue
                 r = SequenceMatcher(None, text, phrase).ratio()
                 if r > best_ratio:
                     best_ratio = r
@@ -915,7 +925,7 @@ class CommandProcessor:
             from src.vector_store import VectorStore
             self._vector_store = VectorStore(
                 persist_dir=os.path.join(self.data_dir, "chroma_db"),
-                min_similarity=0.88,
+                min_similarity=0.97,
                 max_cache_entries=2000,
                 backend=self._vector_cache_backend,
             )

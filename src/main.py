@@ -21,10 +21,10 @@ from dotenv import load_dotenv
 # Menos ruido en consola: Hugging Face, transformers, Supabase
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
-# Silenciar todos los DeprecationWarning (Supabase timeout/verify, etc.)
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-# Silenciar aviso de Hugging Face "unauthenticated requests / HF_TOKEN" (warn o logging)
-warnings.filterwarnings("ignore", message=".*HF Hub.*")
+# Silenciar warnings ruidosos de librerías externas (HF Hub, Supabase, sockets SSL, etc.)
+warnings.filterwarnings("ignore", category=DeprecationWarning)  # timeout/verify de Supabase, etc.
+warnings.filterwarnings("ignore", category=ResourceWarning)     # unclosed ssl.SSLSocket, etc.
+warnings.filterwarnings("ignore", message=".*HF Hub.*")         # HuggingFace Hub sin token
 warnings.filterwarnings("ignore", message=".*HF_TOKEN.*")
 warnings.filterwarnings("ignore", message=".*unauthenticated.*")
 warnings.filterwarnings("ignore", category=UserWarning, message=".*rate limit.*")
@@ -56,7 +56,8 @@ def verify_phase2_dependencies():
         print("Instala con: pip install rich>=13.0.0")
         sys.exit(1)
     
-    print("✓ Dependencias de Fase 2 verificadas")
+    # Evitar caracteres Unicode que pueden fallar con cp1252 en Windows
+    print("Dependencias de Fase 2 verificadas")
 
 
 # Verificar dependencias al inicio
@@ -271,33 +272,26 @@ class VoiceAssistantMVP:
         
         user_name = self.config.get('user_name') or os.getenv('VOICE_ASSISTANT_USER_NAME', 'Usuario')
         features = self.config.get('features') or {}
+        vc_backend = features.get('vector_cache_backend', 'supabase')
+        notes_backend = features.get('notes_backend', 'supabase')
         self.command_processor = CommandProcessor(
             response_generator=self.response_generator,
             user_name=user_name,
-            web_search_enabled=True,  # Phase 2: Habilitar búsqueda web
+            web_search_enabled=True,
             vector_cache_enabled=features.get('vector_cache_enabled', True),
-            vector_cache_backend=features.get('vector_cache_backend', 'chroma'),
+            vector_cache_backend=vc_backend,
+            notes_backend=notes_backend,
         )
         
-        # 5. Inicializar cliente de transcripción (AWS, Google o Vosk local)
-        transcribe_provider = (self.config.get("transcribe_provider") or "vosk").lower()
-        if transcribe_provider == "vosk":
-            from src.transcribe_client_vosk import VoskTranscribeStreamingWrapper
-            vosk_cfg = self.config.get("vosk") or {}
-            self.transcribe_client = VoskTranscribeStreamingWrapper(
-                model_path=vosk_cfg.get("model_path", "model/vosk-model-small-es-0.42"),
-                sample_rate=int(vosk_cfg.get("sample_rate", 16000)),
-                buffer_ms=float(vosk_cfg.get("buffer_ms", 300)),
-            )
-        else:
-            from src.transcribe_client import TranscribeStreamingClientWrapper
-            transcribe_config = self.config['aws']['transcribe']
-            self.transcribe_client = TranscribeStreamingClientWrapper(
-                region=self.config['aws']['region'],
-                language_code=transcribe_config['language_code'],
-                sample_rate=transcribe_config['sample_rate'],
-                vocabulary_name=transcribe_config.get('vocabulary_name')
-            )
+        # 5. Inicializar cliente de transcripción (solo AWS Transcribe)
+        from src.transcribe_client import TranscribeStreamingClientWrapper
+        transcribe_config = self.config['aws']['transcribe']
+        self.transcribe_client = TranscribeStreamingClientWrapper(
+            region=self.config['aws']['region'],
+            language_code=transcribe_config['language_code'],
+            sample_rate=transcribe_config['sample_rate'],
+            vocabulary_name=transcribe_config.get('vocabulary_name'),
+        )
         
         wake_words = self.config['wake_words']
         self.wake_word_detector = WakeWordDetector(
@@ -315,9 +309,9 @@ class VoiceAssistantMVP:
         self.command_transcriber = CommandTranscriber(
             audio_manager=self.audio_manager,
             transcribe_client=self.transcribe_client,
-            silence_threshold=1.5,
-            max_command_duration=10.0,
-            feedback_preventer=self.feedback_preventer  # Phase 3: Pasar FeedbackPreventer
+            silence_threshold=2.0,
+            max_command_duration=60.0,
+            feedback_preventer=self.feedback_preventer,
         )
         
         # Configurar callbacks para transcripción
@@ -401,18 +395,17 @@ class VoiceAssistantMVP:
     async def _process_inline_command(self, command_text: str):
             """Procesa un comando que vino pegado al wake word (ej. 'asistente qué hora es')."""
             try:
-                # Aplicar filtro de transcripción también a comandos inline
                 filtered_text = self.transcription_filter.filter(command_text)
 
                 if filtered_text is None:
                     logger.debug("Inline command rejected by filter, returning to listening state")
+                    self.audio_manager.clear_buffer()
                     self.command_processor.ui_manager.show_listening_panel(
                         wake_word=self.config['wake_words'][0].strip().capitalize(),
                         separator_above=True
                     )
                     return
 
-                # Procesar comando (la UI en recuadros la hace command_processor)
                 command_result = await self.command_processor.process_command(filtered_text, speak=True)
 
                 if not command_result['success']:
@@ -420,6 +413,7 @@ class VoiceAssistantMVP:
             except Exception as e:
                 print_status(f"Error procesando comando: {e}", "error")
                 logger.error("Error en _process_inline_command: %s", e, exc_info=True)
+            self.audio_manager.clear_buffer()
             self.command_processor.ui_manager.show_listening_panel(
                 wake_word=self.config['wake_words'][0].strip().capitalize(),
                 separator_above=True
@@ -432,22 +426,20 @@ class VoiceAssistantMVP:
         try:
             result = await self.command_transcriber.capture_command()
 
-            # Limpiar línea parcial
             print("\r" + " " * 80, end="\r")
 
             if result and result.text.strip():
-                # Aplicar filtro de transcripción
                 filtered_text = self.transcription_filter.filter(result.text)
                 
                 if filtered_text is None:
                     logger.debug("Transcription rejected by filter, returning to listening state")
+                    self.audio_manager.clear_buffer()
                     self.command_processor.ui_manager.show_listening_panel(
                         wake_word=self.config['wake_words'][0].strip().capitalize(),
                         separator_above=True
                     )
                     return
 
-                # Procesar comando (la UI en recuadros la hace command_processor)
                 command_result = await self.command_processor.process_command(
                     filtered_text, speak=True
                 )
@@ -457,6 +449,7 @@ class VoiceAssistantMVP:
             else:
                 print_status("No escuché ningún comando.", "warning")
 
+            self.audio_manager.clear_buffer()
             self.command_processor.ui_manager.show_listening_panel(
                 wake_word=self.config['wake_words'][0].strip().capitalize(),
                 separator_above=True
@@ -465,6 +458,7 @@ class VoiceAssistantMVP:
         except Exception as e:
             print_status(f"Error capturando comando: {e}", "error")
             logger.error("Error en _capture_command: %s", e, exc_info=True)
+            self.audio_manager.clear_buffer()
             self.command_processor.ui_manager.show_listening_panel(
                 wake_word=self.config['wake_words'][0].strip().capitalize(),
                 separator_above=True
@@ -512,7 +506,7 @@ async def main():
         # Cleanup de recursos
         await assistant.stop()
         print()
-        print_status("¡Hasta luego! 👋", "info")
+        print_status("¡Hasta luego!", "info")
         print()
 
 

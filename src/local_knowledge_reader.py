@@ -77,75 +77,60 @@ class LocalKnowledgeReader:
         data_dir: str = "data",
         max_context_tokens: int = 2000,
         max_results: int = 3,
-        threading_manager = None
+        threading_manager = None,
+        notes_backend: str = "supabase",
     ):
         """
         Inicializa el LocalKnowledgeReader.
         
         Args:
-            data_dir: Directorio con archivos .md
+            data_dir: Directorio con archivos .md (usado si notes_backend es "local")
             max_context_tokens: Límite de tokens para contexto
             max_results: Número máximo de notas a retornar
             threading_manager: ThreadingManager para operaciones asíncronas
+            notes_backend: "local" (solo archivos data/*.md) o "supabase" (solo BD user_notes)
         """
         self.data_dir = Path(data_dir)
         self.max_context_tokens = max_context_tokens
         self.max_results = max_results
         self.threading_manager = threading_manager
+        self.notes_backend = notes_backend
         self.logger = logging.getLogger(__name__)
         
-        # Índice en memoria: {filename: Note}
         self._notes_index: Dict[str, Note] = {}
-        
-        # Timestamp de última indexación
         self._last_index_time: Optional[datetime] = None
         
         self.logger.info(
             f"LocalKnowledgeReader inicializado: "
-            f"data_dir={data_dir}, max_tokens={max_context_tokens}"
+            f"data_dir={data_dir}, max_tokens={max_context_tokens}, notes_backend={notes_backend}"
         )
     
     def initialize(self):
         """
-        Inicializa el reader escaneando y indexando notas.
-        
-        Debe llamarse después de __init__ para permitir inicialización
-        asíncrona con threading.
+        Inicializa el reader. Si notes_backend es "local", indexa archivos .md en data/.
+        Si es "supabase", no indexa archivos (las notas se leen desde la BD en cada búsqueda).
         """
+        if self.notes_backend == "supabase":
+            self._last_index_time = datetime.now()
+            self.logger.info("Notas en Supabase: no se indexan archivos locales")
+            return
         start_time = time.time()
-        
         try:
-            # Verificar que data_dir existe
             if not self.data_dir.exists():
                 self.logger.warning(f"Directorio {self.data_dir} no existe, creándolo")
                 self.data_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Escanear archivos .md
             md_files = self._scan_notes_directory()
-            
-            # Leer e indexar cada archivo
             for filepath in md_files:
                 note = self._read_note(filepath)
                 if note:
                     self._notes_index[note.metadata.filename] = note
-            
-            # Actualizar timestamp
             self._last_index_time = datetime.now()
-            
-            # Log resultado
             elapsed = time.time() - start_time
             self.logger.info(
-                f"Indexación completa: {len(self._notes_index)} notas, "
-                f"time={elapsed:.3f}s"
+                f"Indexación completa: {len(self._notes_index)} notas, time={elapsed:.3f}s"
             )
-            
-            # Advertencia si tardó mucho
             if elapsed > 1.0:
-                self.logger.warning(
-                    f"Indexación tardó {elapsed:.3f}s (>1s), "
-                    f"considera optimizar o reducir número de notas"
-                )
-        
+                self.logger.warning(f"Indexación tardó {elapsed:.3f}s (>1s)")
         except Exception as e:
             self.logger.error(f"Error en inicialización: {e}", exc_info=True)
     
@@ -169,26 +154,21 @@ class LocalKnowledgeReader:
         start_time = time.time()
         
         try:
-            # Normalizar query
             query_lower = query.lower().strip()
-            
             if not query_lower:
                 self.logger.warning("Query vacío")
                 return []
             
-            # Buscar notas que contengan términos del query
-            results: List[SearchResult] = []
-            
-            for note in self._notes_index.values():
-                score = self._calculate_relevance_score(note, query_lower)
-                if score > 0:
-                    results.append(SearchResult(note=note, relevance_score=score))
-            
-            # Ordenar por score descendente
-            results.sort(key=lambda r: r.relevance_score, reverse=True)
-            
-            # Retornar top N notas
-            top_notes = [r.note for r in results[:self.max_results]]
+            if self.notes_backend == "supabase":
+                top_notes = self._search_notes_supabase(query_lower)
+            else:
+                results: List[SearchResult] = []
+                for note in self._notes_index.values():
+                    score = self._calculate_relevance_score(note, query_lower)
+                    if score > 0:
+                        results.append(SearchResult(note=note, relevance_score=score))
+                results.sort(key=lambda r: r.relevance_score, reverse=True)
+                top_notes = [r.note for r in results[:self.max_results]]
             
             # Log resultado
             elapsed = time.time() - start_time
@@ -251,6 +231,38 @@ class LocalKnowledgeReader:
             context = self._truncate_to_token_limit(context, self.max_context_tokens)
         
         return context
+    
+    def _search_notes_supabase(self, query: str) -> List[Note]:
+        """Obtiene notas de Supabase (user_notes) y las convierte a List[Note]."""
+        try:
+            from src.notes_db import search_notes, get_recent_notes, is_available
+            if not is_available():
+                return []
+            rows = search_notes(query, limit=self.max_results) if query else get_recent_notes(limit=self.max_results)
+            notes: List[Note] = []
+            for row in rows:
+                content = (row.get("content") or "").strip()
+                if not content:
+                    continue
+                created = row.get("created_at")
+                if isinstance(created, str):
+                    try:
+                        created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    except Exception:
+                        created = datetime.now()
+                elif created is None:
+                    created = datetime.now()
+                meta = NoteMetadata(
+                    filename=f"supabase_{str(row.get('id', ''))[:8]}" or "nota",
+                    filepath=Path("."),
+                    modified_time=created,
+                    size_bytes=len(content.encode("utf-8")),
+                )
+                notes.append(Note(metadata=meta, content=content))
+            return notes
+        except Exception as e:
+            self.logger.debug("No se pudieron cargar notas de Supabase: %s", e)
+            return []
     
     def _scan_notes_directory(self) -> List[Path]:
         """
@@ -379,12 +391,11 @@ class LocalKnowledgeReader:
     
     def re_index_if_needed(self):
         """
-        Re-indexa si hay cambios en los archivos.
-        
-        Compara archivos actuales con índice y re-indexa si hay diferencias.
+        Re-indexa si hay cambios en los archivos (solo cuando notes_backend es "local").
         """
+        if self.notes_backend == "supabase":
+            return
         try:
-            # Escanear archivos actuales
             current_files = set(f.name for f in self._scan_notes_directory())
             indexed_files = set(self._notes_index.keys())
             

@@ -94,18 +94,14 @@ class FileWriterAction(Action):
     def execute(self, parameters: Dict[str, Any]) -> ActionResult:
         """
         Ejecuta la creación/escritura de la nota.
+        Las notas se guardan solo en Supabase (tabla user_notes), no en archivos locales.
         
         Args:
-            parameters: Debe contener:
-                - 'content': Contenido de la nota (requerido)
-                - 'filename': Nombre del archivo (opcional, default: 'notas.md')
+            parameters: Debe contener 'content': contenido de la nota (requerido)
             
         Returns:
             ActionResult con el resultado de la ejecución
-            
-        Requisito: 6.2 - Crear archivo en data/
         """
-        # Validar parámetros
         if not self.validate_parameters(parameters):
             result = ActionResult(
                 success=False,
@@ -116,84 +112,42 @@ class FileWriterAction(Action):
             return result
         
         content = parameters['content'].strip()
-        filename = parameters.get('filename', 'notas.md')
         
         try:
-            # Sanitizar filename
-            # Requisito: 6.6, 12.3 - Sanitización de filename
-            filename = self._sanitize_filename(filename)
-            
-            # Asegurar extensión .md
-            if not filename.endswith('.md'):
-                filename += '.md'
-            
-            # Construir path completo
-            file_path = self.data_dir / filename
-            
-            # Validar que el path esté dentro de data/
-            # Requisito: 6.7, 12.2 - Validación de path
-            if not self._is_safe_path(file_path):
-                error_msg = "Path inválido: debe estar dentro del directorio data/"
-                logger.error(error_msg)
-                
+            from src.notes_db import save_note as save_note_supabase, is_available
+            if not is_available():
                 result = ActionResult(
                     success=False,
-                    message="Error de seguridad",
-                    error=error_msg
+                    message="No se puede guardar la nota",
+                    error="Configura Supabase: SUPABASE_URL, SUPABASE_SERVICE_KEY en .env y crea la tabla user_notes (ver docs/SUPABASE_VECTOR_SETUP.md)"
                 )
-                
                 self._log_execution(parameters, result)
                 return result
-            
-            # Generar timestamp ISO 8601
-            # Requisito: 7.1 - Timestamp ISO 8601
+            if not save_note_supabase(content, source="voice"):
+                result = ActionResult(
+                    success=False,
+                    message="Error al guardar nota",
+                    error="No se pudo guardar en la base de datos"
+                )
+                self._log_execution(parameters, result)
+                return result
             timestamp = datetime.now().isoformat()
-            
-            # Formatear entrada con timestamp
-            # Requisito: 7.2 - Formato de entrada con timestamp
-            entry = f"\n## {timestamp}\n\n{content}\n"
-            
-            # Determinar si es archivo nuevo o existente
-            is_new_file = not file_path.exists()
-            
-            # Escribir nota
-            # Requisito: 7.3, 12.4 - Codificación UTF-8
-            # Requisito: 7.4, 6.5 - Modo append
-            mode = 'w' if is_new_file else 'a'
-            
-            with open(file_path, mode, encoding='utf-8') as f:
-                if is_new_file:
-                    # Escribir header para archivo nuevo
-                    f.write(f"# Notas - {filename}\n")
-                
-                f.write(entry)
-            
-            logger.info(f"Nota guardada: {file_path} ({'nuevo' if is_new_file else 'append'})")
-            
+            logger.info("Nota guardada en Supabase (user_notes)")
             result = ActionResult(
                 success=True,
-                message=f"Nota guardada en {filename}",
-                data={
-                    'filename': filename,
-                    'path': str(file_path.absolute()),
-                    'is_new': is_new_file,
-                    'timestamp': timestamp
-                }
+                message="Nota guardada en la base de datos",
+                data={"timestamp": timestamp}
             )
-            
             self._log_execution(parameters, result)
             return result
-            
         except Exception as e:
             error_msg = f"Error al guardar nota: {str(e)}"
             logger.error(error_msg)
-            
             result = ActionResult(
                 success=False,
                 message="Error al guardar nota",
                 error=error_msg
             )
-            
             self._log_execution(parameters, result)
             return result
     

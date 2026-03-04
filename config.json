@@ -11,10 +11,10 @@
         },
 
         "transcribe": {
-            "_comment": "FUTURA IMPLEMENTACIÓN — Actualmente se usa Vosk. Ver MIGRACION_AWS.md",
+            "_comment": "EN USO — Transcripción de voz con AWS Transcribe. Ver MIGRACION_AWS.md",
             "language_code": "es-ES",
             "sample_rate": 16000,
-            "vocabulary_name": "voice-assistant-vocab"
+            "vocabulary_name": null
         },
 
         "lex": {
@@ -59,15 +59,11 @@
         "cloud_sync_enabled": false,
         "iot_control_enabled": false,
         "vector_cache_enabled": true,
-        "vector_cache_backend": "supabase"
+        "vector_cache_backend": "supabase",
+        "notes_backend": "supabase"
     },
 
-    "user_name": "Daniis",
+    "user_name": "Alejandro",
 
-    "transcribe_provider": "vosk",
-    "vosk": {
-        "model_path": "model/vosk-model-small-es-0.42",
-        "sample_rate": 16000,
-        "buffer_ms": 500
-    }
+    "transcribe_provider": "aws"
 }

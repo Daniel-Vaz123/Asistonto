@@ -167,3 +167,28 @@ Si no pones `vector_cache_backend` o pones `"chroma"`, se seguirá usando Chroma
 | 8 | config.json | `vector_cache_backend`: `"supabase"` |
 
 Cuando todo esté configurado, el asistente usará Supabase para buscar y guardar el cache de preguntas/respuestas en la base de datos en lugar de la carpeta local de Chroma.
+
+---
+
+## 10. Tabla de notas del usuario (solo en base de datos)
+
+Las notas que creas con voz se guardan **solo en Supabase** (no en archivos locales). Crea la tabla `user_notes`:
+
+En **SQL Editor** → **New query**, ejecuta:
+
+```sql
+-- Tabla para notas del usuario (voz o app)
+create table if not exists public.user_notes (
+  id uuid primary key default gen_random_uuid(),
+  content text not null,
+  source text default 'voice',
+  created_at timestamptz default now()
+);
+
+comment on table public.user_notes is 'Notas del usuario guardadas por el asistente (solo en BD)';
+
+-- Permitir que el asistente lea/escriba
+alter table public.user_notes disable row level security;
+```
+
+Las mismas variables (`SUPABASE_URL`, `SUPABASE_SERVICE_KEY`) sirven para cache Q&A y para notas.

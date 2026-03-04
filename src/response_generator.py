@@ -303,20 +303,15 @@ class ResponseGenerator:
                 logger.debug("Auto-mute activado antes de reproducción")
             
             try:
-                # Reproducir audio (main thread)
-                # El play_audio con block=True espera a que se escriba al stream de PyAudio
-                self.audio_manager.play_audio(audio_data, block=block)
-                
-                # CRÍTICO: Esperar a que el buffer de PyAudio termine de reproducirse físicamente
-                # PyAudio escribe al buffer del sistema operativo, que sigue reproduciendo
-                # después de que write() retorna. Necesitamos calcular la duración real del audio.
-                if block:
-                    # Calcular duración del audio (PCM int16) y esperar a que termine de sonar
-                    # para no capturar eco y mostrar "Di Asistente" lo antes posible
-                    num_samples = len(audio_data) // 2
-                    duration_seconds = num_samples / self.audio_manager.sample_rate
-                    # Sin margen extra: el panel vuelve en cuanto termina la duración del audio
-                    await asyncio.sleep(max(0.05, duration_seconds))
+                # Reproducir audio en un executor para NO bloquear el event loop.
+                # play_audio(block=True) espera internamente a que PyAudio escriba
+                # todos los chunks, así que cuando retorna el audio ya terminó de sonar.
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None, self.audio_manager.play_audio, audio_data, block
+                )
+                # Pequeña pausa para que el último buffer de PyAudio termine de sonar
+                await asyncio.sleep(0.3)
                 
                 logger.info("Audio reproducido correctamente")
                 return True

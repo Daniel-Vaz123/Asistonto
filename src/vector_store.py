@@ -99,9 +99,9 @@ class VectorStore:
     def __init__(
         self,
         persist_dir: str = "data/chroma_db",
-        min_similarity: float = 0.88,
+        min_similarity: float = 0.97,
         max_cache_entries: int = 2000,
-        backend: str = "chroma",
+        backend: str = "supabase",
         supabase_url: Optional[str] = None,
         supabase_key: Optional[str] = None,
     ):
@@ -117,7 +117,7 @@ class VectorStore:
         self.persist_dir = persist_dir
         self.min_similarity = min_similarity
         self.max_cache_entries = max_cache_entries
-        self.backend = (backend or "chroma").lower()
+        self.backend = (backend or "supabase").lower()
         self.supabase_url = (supabase_url or os.getenv("SUPABASE_URL") or "").strip()
         self.supabase_key = (supabase_key or os.getenv("SUPABASE_SERVICE_KEY") or "").strip()
         self._collection = None
@@ -320,6 +320,33 @@ class VectorStore:
             logger.info("Cache vectorial: evicted %d entradas", to_remove)
         except Exception as e:
             logger.warning("Error evicting cache: %s", e)
+
+    def clear_all(self) -> int:
+        """Elimina TODAS las entradas del caché vectorial. Retorna cantidad eliminada."""
+        try:
+            if self.backend == "supabase":
+                sb = self._get_supabase()
+                if not sb:
+                    return 0
+                r = sb.table(self.TABLE_QA).select("id").execute()
+                if r.data:
+                    ids = [row["id"] for row in r.data]
+                    sb.table(self.TABLE_QA).delete().in_("id", ids).execute()
+                    logger.info("Cache vectorial Supabase: eliminadas %d entradas", len(ids))
+                    return len(ids)
+                return 0
+            coll = self._get_collection()
+            if not coll:
+                return 0
+            all_ids = coll.get()["ids"]
+            if all_ids:
+                coll.delete(ids=all_ids)
+                logger.info("Cache vectorial Chroma: eliminadas %d entradas", len(all_ids))
+                return len(all_ids)
+            return 0
+        except Exception as e:
+            logger.warning("Error limpiando cache vectorial: %s", e)
+            return 0
 
     def stats(self) -> dict:
         """Devuelve estadísticas del cache (número de entradas, etc.)."""
