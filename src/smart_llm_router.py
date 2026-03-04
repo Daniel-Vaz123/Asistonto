@@ -98,13 +98,21 @@ INTENTS SOPORTADOS:
      * "Guarda que mañana tengo clase"
      * "El mini sumo está casi listo"
      * "Avancé bastante en las características"
-   - Ejemplos LEER (cualquier pregunta sobre notas pasadas):
+   - Ejemplos LEER (CRÍTICO - cualquier mención de revisar/leer/buscar notas):
      * "¿Qué notas tengo sobre ChromaSys?"
      * "Busca mis notas de Python"
      * "¿Qué hemos anotado del mini sumo?"
      * "Revisa mis notas sobre el proyecto"
      * "¿Qué apunté sobre la reunión?"
      * "Según mis notas, ¿cómo va el avance?"
+     * "Revisa las notas guardadas y dime de qué es mi junta"
+     * "Qué dice la nota de mañana"
+     * "Dime de qué trata la nota sobre la escuela"
+     * "Revisa mis apuntes del proyecto"
+     * "Lee mis notas y dime qué tengo pendiente"
+     * "Consulta mis notas sobre el mini sumo"
+     * "Busca en mis apuntes sobre la reunión"
+     * "¿Qué información tengo guardada sobre...?"
    - Parameters CREAR: {"content": "texto de la nota"}
    - Parameters LEER: {"query": "término de búsqueda", "action": "read"}
 
@@ -125,8 +133,9 @@ REGLAS CRÍTICAS:
 - confidence debe ser 0.0-1.0 (usa 0.9+ si estás seguro, 0.7-0.9 si hay ambigüedad, <0.7 si no estás seguro)
 - Tolera errores de transcripción (ora/hora, ola/hola, anota/nota)
 - Para NOTAS: Si el usuario menciona información que parece importante o dice algo como "apunta", "anota", "guarda", "recuerda", clasifica como file con {"content": "..."}
-- Para LEER NOTAS: Si pregunta por notas pasadas, información guardada, o dice "según mis notas", clasifica como file con {"query": "...", "action": "read"}
+- Para LEER NOTAS: Si menciona "revisar", "leer", "buscar", "consultar", "qué dice", "qué tengo" seguido de "notas", "apuntes", "guardado", clasifica SIEMPRE como file con {"query": "...", "action": "read"}
 - SÉ AGRESIVO con note_create: Si hay duda entre conversational y file, elige file si el contenido parece información a recordar
+- SÉ MUY AGRESIVO con note_read: Si el usuario pregunta por información guardada, notas, apuntes, o dice "revisa", "lee", "busca" + "notas/apuntes", SIEMPRE clasifica como file con action="read"
 """
     
     def __init__(

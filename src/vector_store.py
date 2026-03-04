@@ -22,7 +22,7 @@ _chroma_client = None
 _embedding_fn = None
 _embedding_model = None
 
-EMBEDDING_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 
 

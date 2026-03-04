@@ -830,13 +830,16 @@ class CommandProcessor:
         """
         notes_context = ""
         
+        # Si no hay query específico, usar el comando completo como query
+        search_query = query.strip() if query else command_text
+        
         # Buscar notas relevantes si Local RAG está habilitado
-        if self.local_knowledge and query:
+        if self.local_knowledge and search_query:
             try:
                 # Ejecutar búsqueda en thread separado
                 future = self.threading_manager.execute_async(
                     self.local_knowledge.search,
-                    query,
+                    search_query,
                     timeout=5
                 )
                 
@@ -845,10 +848,24 @@ class CommandProcessor:
                 if notes:
                     # Formatear contexto
                     notes_context = self.local_knowledge.format_context(notes)
-                    logger.info(f"Encontradas {len(notes)} notas relevantes para query: '{query}'")
+                    logger.info(f"Encontradas {len(notes)} notas relevantes para query: '{search_query}'")
                 else:
-                    logger.info(f"No se encontraron notas para query: '{query}'")
-                    return f"No encontré notas sobre {query}, {self.user_name}.", False
+                    logger.info(f"No se encontraron notas para query: '{search_query}'")
+                    # Si no hay notas, buscar con términos más generales
+                    if query:  # Si había un query específico, intentar con el comando completo
+                        logger.info("Reintentando búsqueda con comando completo")
+                        future = self.threading_manager.execute_async(
+                            self.local_knowledge.search,
+                            command_text,
+                            timeout=5
+                        )
+                        notes = future.result(timeout=5)
+                        if notes:
+                            notes_context = self.local_knowledge.format_context(notes)
+                            logger.info(f"Encontradas {len(notes)} notas con búsqueda ampliada")
+                    
+                    if not notes_context:
+                        return f"No encontré notas relacionadas, {self.user_name}.", False
                     
             except Exception as e:
                 logger.error(f"Error buscando notas: {e}")
@@ -856,18 +873,29 @@ class CommandProcessor:
         
         # Si no hay contexto de notas, responder que no hay información
         if not notes_context:
-            return f"No encontré notas sobre {query}, {self.user_name}.", False
+            return f"No encontré notas guardadas, {self.user_name}.", False
         
         # Preparar prompt para DeepSeek con contexto de notas
         system_prompt = self._build_system_prompt(notes_context=notes_context)
         
-        # Llamar a DeepSeek en thread (Pensando ya se mostró una vez al inicio del comando)
+        # Llamar a DeepSeek en thread
+        self._update_state(SystemState.PROCESANDO)
+        self.ui_manager.show_thinking_indicator()
+        
         future = self.threading_manager.execute_async(
             self._call_deepseek,
             command_text,
             system_prompt,
             timeout=60
         )
+        
+        try:
+            response_text = future.result(timeout=60)
+        except Exception as e:
+            logger.error(f"DeepSeek falló: {e}")
+            response_text = "Lo siento, no pude procesar tu solicitud."
+        
+        return response_text, False  # used_web_search = False
         
         try:
             response_text = future.result(timeout=60)
@@ -911,11 +939,21 @@ class CommandProcessor:
         Requisito: 2.5 - Preservar flujo conversacional de Fase 2
         """
         # Consultar cache vectorial antes de llamar a DeepSeek (ahorro de créditos)
+        # IMPORTANTE: Ejecutar en thread separado con timeout para no bloquear
         store = self._get_vector_store()
         if store:
-            cached = store.get_cached_response(command_text)
-            if cached is not None:
-                return cached, False
+            try:
+                future = self.threading_manager.execute_async(
+                    store.get_cached_response,
+                    command_text,
+                    timeout=3
+                )
+                cached = future.result(timeout=3)
+                if cached is not None:
+                    logger.info("Respuesta obtenida del cache vectorial")
+                    return cached, False
+            except Exception as e:
+                logger.warning(f"Cache vectorial timeout o error (continuando sin cache): {e}")
 
         # Verificar necesidad de web search
         needs_search = self.query_router.requires_web_search(command_text)
@@ -961,10 +999,18 @@ class CommandProcessor:
             response_text = "Lo siento, no pude procesar tu solicitud."
 
         # Guardar en cache vectorial para futuras preguntas similares
+        # IMPORTANTE: Ejecutar en thread separado sin esperar (fire-and-forget)
         if response_text and store:
-            if getattr(store, "backend", None) == "supabase":
-                logger.info("Guardando respuesta en Supabase (cache vectorial)...")
-            store.add_to_cache(command_text, response_text)
+            try:
+                self.threading_manager.execute_async(
+                    store.add_to_cache,
+                    command_text,
+                    response_text,
+                    timeout=5
+                )
+                logger.debug("Guardando respuesta en cache vectorial (background)")
+            except Exception as e:
+                logger.debug(f"Error guardando en cache vectorial: {e}")
 
         return response_text, bool(web_context)
     async def _process_conversational_with_notes(self, command_text: str, query: str) -> tuple[str, bool]:

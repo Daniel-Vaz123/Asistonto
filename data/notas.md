@@ -27,3 +27,11 @@ que mañana tengo que entrar junta a las nueve de la mañana
 ## 2026-03-01T20:37:08.073589
 
 y recuérdame que mañana la junta es sobre sepe
+
+## 2026-03-03T18:25:09.571707
+
+en una nota que mañana tengo junta sobre manzanas
+
+## 2026-03-03T18:35:07.267020
+
+das y dime en qué porcentaje del proyecto de silla

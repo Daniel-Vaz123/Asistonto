@@ -62,7 +62,7 @@
         "vector_cache_backend": "supabase"
     },
 
-    "user_name": "Alejandro",
+    "user_name": "Daniis",
 
     "transcribe_provider": "vosk",
     "vosk": {
