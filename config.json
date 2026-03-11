@@ -57,10 +57,12 @@
         "voice_cache_enabled": true,
         "debug_logging": false,
         "cloud_sync_enabled": false,
-        "iot_control_enabled": false
+        "iot_control_enabled": false,
+        "vector_cache_enabled": true,
+        "vector_cache_backend": "supabase"
     },
 
-    "user_name": "Alejandro",
+    "user_name": "Daniis",
 
     "transcribe_provider": "vosk",
     "vosk": {

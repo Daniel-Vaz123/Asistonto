@@ -24,7 +24,7 @@ import os
 import hashlib
 import time
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, TYPE_CHECKING
 import json
 
 import numpy as np
@@ -32,6 +32,9 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
 from src.audio_manager import AudioManager
+
+if TYPE_CHECKING:
+    from src.feedback_preventer import FeedbackPreventer
 
 
 logger = logging.getLogger(__name__)
@@ -61,7 +64,8 @@ class ResponseGenerator:
         cache_enabled: bool = True,
         cache_dir: str = "cache",
         region: str = "us-east-1",
-        volume_gain: float = 3.0
+        feedback_preventer: Optional['FeedbackPreventer'] = None,  # Phase 3: Auto-Mute
+        volume_gain: float = 3.0,
     ):
         """
         Inicializa el generador de respuestas.
@@ -74,6 +78,7 @@ class ResponseGenerator:
             cache_enabled: Habilitar cache de respuestas
             cache_dir: Directorio para almacenar cache
             region: Región de AWS
+            feedback_preventer: FeedbackPreventer para auto-mute (Phase 3)
         """
         self.audio_manager = audio_manager
         self.polly_voice_id = polly_voice_id
@@ -82,6 +87,7 @@ class ResponseGenerator:
         self.cache_enabled = cache_enabled
         self.cache_dir = Path(cache_dir)
         self.region = region
+        self.feedback_preventer = feedback_preventer  # Phase 3: Auto-Mute
         self.volume_gain = volume_gain
         
         # Crear directorio de cache si no existe
@@ -98,7 +104,9 @@ class ResponseGenerator:
         
         logger.info(
             f"ResponseGenerator inicializado: voz={polly_voice_id}, "
-            f"formato={output_format}, cache={'habilitado' if cache_enabled else 'deshabilitado'}"
+            f"formato={output_format}, cache={'habilitado' if cache_enabled else 'deshabilitado'}, "
+            f"auto_mute={'enabled' if feedback_preventer else 'disabled'}, "
+            f"volume_gain={volume_gain}"
         )
     
     def _get_polly_client(self):
@@ -249,9 +257,16 @@ class ResponseGenerator:
     
     async def speak(self, text: str, block: bool = True) -> bool:
         """
-        Sintetiza y reproduce texto como voz.
+        Sintetiza y reproduce texto como voz con auto-mute integrado.
         
         Este es el método principal para hacer que el asistente hable.
+        
+        Phase 3: Integra FeedbackPreventer para prevenir auto-transcripción:
+        1. Activa auto-mute ANTES de reproducir
+        2. Reproduce audio
+        3. ESPERA a que el audio termine de reproducirse físicamente usando queue.join()
+        4. ESPERA adicional para el buffer de PyAudio (latencia del sistema)
+        5. Desactiva auto-mute DESPUÉS de reproducir (garantizado con finally)
         
         Args:
             text: Texto a hablar
@@ -261,6 +276,7 @@ class ResponseGenerator:
             True si se reprodujo exitosamente, False en caso contrario
             
         Requisito: 7.2 - Reproducir audio de respuesta inmediatamente
+        Requisito: 1.1, 1.3 - Auto-mute durante reproducción (Phase 3)
         """
         if not text:
             return False
@@ -276,16 +292,46 @@ class ResponseGenerator:
                 audio_data = self._convert_mp3_to_pcm(audio_data)
                 if not audio_data:
                     return False
-            
+
+            # Aplicar ganancia de volumen si corresponde
             if self.volume_gain != 1.0:
                 audio_data = self._amplify_pcm(audio_data, self.volume_gain)
 
-            self.audio_manager.play_audio(audio_data, block=block)
-            logger.info("Audio reproducido correctamente")
-            return True
+            # Phase 3: Activar auto-mute ANTES de reproducir
+            if self.feedback_preventer:
+                self.feedback_preventer.set_speaking()
+                logger.debug("Auto-mute activado antes de reproducción")
+            
+            try:
+                # Reproducir audio (main thread)
+                # El play_audio con block=True espera a que se escriba al stream de PyAudio
+                self.audio_manager.play_audio(audio_data, block=block)
+                
+                # CRÍTICO: Esperar a que el buffer de PyAudio termine de reproducirse físicamente
+                # PyAudio escribe al buffer del sistema operativo, que sigue reproduciendo
+                # después de que write() retorna. Necesitamos calcular la duración real del audio.
+                if block:
+                    # Calcular duración del audio (PCM int16) y esperar a que termine de sonar
+                    # para no capturar eco y mostrar "Di Asistente" lo antes posible
+                    num_samples = len(audio_data) // 2
+                    duration_seconds = num_samples / self.audio_manager.sample_rate
+                    # Sin margen extra: el panel vuelve en cuanto termina la duración del audio
+                    await asyncio.sleep(max(0.05, duration_seconds))
+                
+                logger.info("Audio reproducido correctamente")
+                return True
+            finally:
+                # Phase 3: Desactivar auto-mute DESPUÉS de reproducir
+                # El finally garantiza que se ejecute incluso si hay error
+                if self.feedback_preventer:
+                    self.feedback_preventer.clear_speaking()
+                    logger.debug("Auto-mute desactivado después de reproducción")
                 
         except Exception as e:
             logger.error(f"Error reproduciendo audio: {e}")
+            # Asegurar que auto-mute se desactive incluso con error
+            if self.feedback_preventer:
+                self.feedback_preventer.clear_speaking()
             return False
     
     @staticmethod
