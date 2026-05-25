@@ -35,3 +35,7 @@ pywhatkit>=5.4               # YouTube playback y acciones del sistema
 chromadb>=0.4.0              # Almacenamiento vectorial persistente (local)
 sentence-transformers>=2.2.0  # Embeddings locales multilingües (español)
 supabase>=2.0.0               # Opcional: cache vectorial en Supabase (pgvector)
+
+# GUI Fase 1 (offline)
+customtkinter>=5.2.0
+pyttsx3>=2.90

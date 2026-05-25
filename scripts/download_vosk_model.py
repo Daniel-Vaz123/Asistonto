@@ -9,7 +9,7 @@ import zipfile
 import urllib.request
 
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip"
-MODEL_DIR = "model"
+MODEL_DIR = "models"
 MODEL_NAME = "vosk-model-small-es-0.42"
 
 

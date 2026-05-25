@@ -63,7 +63,9 @@
         "notes_backend": "supabase"
     },
 
-    "user_name": "Alejandro",
+    "user_name": "Daniis",
 
-    "transcribe_provider": "aws"
+    "transcribe_provider": "aws",
+
+    "vosk_model_path": "models/vosk-model-small-es-0.42"
 }
